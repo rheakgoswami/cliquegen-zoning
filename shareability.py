@@ -2,6 +2,8 @@ import pandas as pd
 from geopy.distance import geodesic
 from itertools import permutations
 import itertools
+from shapely.wkt import loads
+from shapely.geometry import LineString, Point
 
 def reduce(df, major_length):
   return df[df['distance_kilometers'] <= major_length]
