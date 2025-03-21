@@ -83,7 +83,7 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
     # we know that at a minimum that we will always have at least 2 trips
     shared_map[2] = []
     for requests in itertools.combinations(range(no_of_trips), 2):
-      if can_serve_req(requests, max_diameter):
+      if can_serve_req(requests, max_diameter, data_reduced):
         shared_map[2].append(requests)
     final_results.extend(shared_map[2])
 
