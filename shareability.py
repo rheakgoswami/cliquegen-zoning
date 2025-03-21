@@ -4,9 +4,11 @@ from itertools import permutations
 import itertools
 from shapely.wkt import loads
 from shapely.geometry import LineString, Point
+import numpy as np
+import os
 
 def generate_data(df): 
-  file_path = "./lodes_2021-01-04.csv"
+  file_path = os.path.join(os.path.dirname(__file__), "lodes_2021-01-04.csv")
   df = pd.read_csv(file_path)
 
   # Select a random sample of 300 rows from the original dataset
@@ -77,9 +79,6 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
     shared_map = {}
     final_results = []
     cardinality = 2
-    not_found = 0
-    found = 0
-    feasible_num = 0
 
     # we know that at a minimum that we will always have at least 2 trips
     shared_map[2] = []
@@ -119,25 +118,18 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
               # sub is already a sorted tuple because new_candidate is sorted.
               if sub not in prev_shared:
                 candidate_valid = False
-                not_found += 1
                 break
             if candidate_valid:
-              found += 1
               if can_serve_req(new_candidate, max_diameter, data_reduced):
-                feasible_num += 1
                 shared_map[next_card].append(new_candidate)
 
       final_results.extend(shared_map[next_card])
       cardinality += 1
-
-    print("# Feasible: ", feasible_num)
-    print("# Found: ", found)
-    print("# Not Found: ", not_found)
     return final_results
 
 def main(): 
-    # potential problems with file path 
-    df = pd.read_csv('./new_synthetic_data.csv')
+    filepath = os.path.join(os.path.dirname(__file__), "new_synthetic_data.csv")
+    df = pd.read_csv(filepath)
 
     # Displaying the first few rows of the DataFrame
     len_trips = 300
