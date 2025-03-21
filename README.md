@@ -26,7 +26,8 @@ I provide two synthetic data files in the repository, and it can be changed to s
 
 Pretty much, if you hit the play button on the top right of your VSCode, you can run the shareability.py python file or you can do it from the terminal by calling "python shareability.py". For the default command in the main(), you should see the following print in your console after running for about 5.5 minutes (as of 3/21). 
 
-Expected Output:
+##### Expected Output:
+
         h_geocode     w_geocode  ...                                               line  distance_kilometers
 0    470650112033  470650113214  ...  LINESTRING (-85.05276256397683 35.005649318052...             0.452896
 1    470650114475  470650114451  ...  LINESTRING (-85.11318749999286 35.115935750020...             5.224514
