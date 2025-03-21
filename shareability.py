@@ -5,6 +5,42 @@ import itertools
 from shapely.wkt import loads
 from shapely.geometry import LineString, Point
 
+def generate_data(df): 
+  file_path = "./lodes_2021-01-04.csv"
+  df = pd.read_csv(file_path)
+
+  # Select a random sample of 300 rows from the original dataset
+  sampled_df = df.sample(n=300, replace=True).copy()
+
+  # Assign random total_jobs between 1 and 100
+  sampled_df["total_jobs"] = np.random.randint(1, 101, size=300)
+
+  # Function to shift latitude and longitude based on a random distance (1-10 miles)
+  def perturb_location(lat, lon, distance_miles):
+      # Approximate conversion: 1 mile ~ 0.0145 degrees latitude
+      lat_shift = np.random.uniform(-1, 1) * distance_miles * 0.0145
+      lon_shift = np.random.uniform(-1, 1) * distance_miles * 0.0182  # Adjusting for longitude scaling
+      return lat + lat_shift, lon + lon_shift
+
+  # Generate new destination locations based on random distance sampling
+  random_distances = np.random.uniform(1, 6, size=300)
+  new_dest_lats, new_dest_lons = zip(*[perturb_location(lat, lon, d) for lat, lon, d in zip(sampled_df["origin_loc_lat"], sampled_df["origin_loc_lon"], random_distances)])
+
+  # Update destination coordinates
+  sampled_df["dest_loc_lat"] = new_dest_lats
+  sampled_df["dest_loc_lon"] = new_dest_lons
+
+  # Update geometry strings accordingly
+  sampled_df["origin_geom"] = sampled_df.apply(lambda row: f"POINT ({row.origin_loc_lon} {row.origin_loc_lat})", axis=1)
+  sampled_df["dest_geom"] = sampled_df.apply(lambda row: f"POINT ({row.dest_loc_lon} {row.dest_loc_lat})", axis=1)
+
+  # Keep only required columns
+  synthetic_df = sampled_df[["h_geocode", "w_geocode", "total_jobs", "origin_loc_lat", "origin_loc_lon",
+                            "dest_loc_lat", "dest_loc_lon", "origin_geom", "dest_geom"]]
+
+  # Save the synthetic dataset
+  synthetic_df.to_csv('new_synthetic_data_uniform.csv', index=False)
+
 def reduce(df, major_length):
   return df[df['distance_kilometers'] <= major_length]
 
@@ -100,7 +136,8 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
     return final_results
 
 def main(): 
-    df = pd.read_csv('new_synthetic_data.csv')
+    # potential problems with file path 
+    df = pd.read_csv('./new_synthetic_data.csv')
 
     # Displaying the first few rows of the DataFrame
     len_trips = 300
