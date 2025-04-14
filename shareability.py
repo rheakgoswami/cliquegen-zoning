@@ -7,6 +7,7 @@ from shapely.geometry import LineString, Point
 import numpy as np
 import os
 
+# need to check generate_data because there is something off 
 def generate_data(df): 
   file_path = os.path.join(os.path.dirname(__file__), "lodes_2021-01-04.csv")
   df = pd.read_csv(file_path)
@@ -47,6 +48,7 @@ def reduce(df, major_length):
   return df[df['distance_kilometers'] <= major_length]
 
 # Determines if a set of trips can be feasibly shared by checking the total travel distance.
+# can be optimized further
 def can_serve_req(requests, max_diameter, data_reduced):
     if len(requests) < 2:
         return False
@@ -82,6 +84,7 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
 
     # we know that at a minimum that we will always have at least 2 trips
     shared_map[2] = []
+    # combinations already makes it so that order does not matter
     for requests in itertools.combinations(range(no_of_trips), 2):
       if can_serve_req(requests, max_diameter, data_reduced):
         shared_map[2].append(requests)
@@ -96,7 +99,7 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
       tried = set()
       prev_list = shared_map[cardinality]
       l_prev = len(prev_list)
-      prev_shared = set(prev_list)
+      # prev_shared = set(prev_list)
 
       # combine pairs of previous candidates to form next valid candidates
       for i in range(l_prev):
@@ -105,6 +108,7 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
           t2 = prev_list[j]
           # common - they should have one element difference
           # check that at the beginning they have the same ordering of trips
+          # think we do not need some parts of this section 
           if t1[:-1] == t2[:-1]:
             new_candidate = t1 + (t2[-1],)
             if new_candidate in tried:
@@ -116,7 +120,7 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
             candidate_valid = True
             for sub in itertools.combinations(new_candidate, cardinality):
               # sub is already a sorted tuple because new_candidate is sorted.
-              if sub not in prev_shared:
+              if sub not in prev_list:
                 candidate_valid = False
                 break
             if candidate_valid:

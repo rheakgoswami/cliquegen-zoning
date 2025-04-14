@@ -3,10 +3,10 @@
 #### Mentor: Hins Hu
 #### Advisor: Professor Samitha Samaranayake 
 
-## How to use this repository? 
-### Clone the repository 
+## How to Use this Repository? 
+### Clone the Repository 
 Clone the repository in your local as it has all the files you need for running shareability.py. 
-### Activate Virtual Environment and Install proper requirements 
+### Activate Virtual Environment and Install Proper Requirements 
 For MacOS/Linux, you can activate the virtual environment by using the source command. 
     source venv/bin/activate
 
