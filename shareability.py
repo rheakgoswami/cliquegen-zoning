@@ -68,11 +68,12 @@ def can_serve_req(requests, max_diameter, data_reduced):
         return False
 
     # Try all permutations to find the shortest shared path
-    min_dist = unshared_dist
     for combo in permutations(locations):
         dist = sum(geodesic(combo[i], combo[i + 1]).km for i in range(len(combo) - 1))
         # return the first instance that satisfies both constraints
-        if dist < min_dist and min_dist <= max_diameter:
+        # counts it out in the first go so probably there are a lot more 
+        # it needs to be actually worth it to share the trips
+        if dist < unshared_dist and dist <= max_diameter:
             return True
     return False
 
@@ -85,6 +86,7 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
     # we know that at a minimum that we will always have at least 2 trips
     shared_map[2] = []
     # combinations already makes it so that order does not matter
+    # forming the base foundation of the cliques of size 2
     for requests in itertools.combinations(range(no_of_trips), 2):
       if can_serve_req(requests, max_diameter, data_reduced):
         shared_map[2].append(requests)
@@ -96,37 +98,33 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
       shared_map[next_card] = []
 
       # prepare prev candidates for efficient look up
-      tried = set()
       prev_list = shared_map[cardinality]
-      l_prev = len(prev_list)
-      # prev_shared = set(prev_list)
+      new_candidate = []
 
-      # combine pairs of previous candidates to form next valid candidates
-      for i in range(l_prev):
-        for j in range(i+1, l_prev):
-          t1 = prev_list[i]
-          t2 = prev_list[j]
-          # common - they should have one element difference
-          # check that at the beginning they have the same ordering of trips
-          # think we do not need some parts of this section 
-          if t1[:-1] == t2[:-1]:
-            new_candidate = t1 + (t2[-1],)
-            if new_candidate in tried:
-              continue
-            tried.add(new_candidate)
-
-            # now check that every sub combination of the new candidate exists
-            # at prev level
-            candidate_valid = True
-            for sub in itertools.combinations(new_candidate, cardinality):
-              # sub is already a sorted tuple because new_candidate is sorted.
-              if sub not in prev_list:
-                candidate_valid = False
-                break
-            if candidate_valid:
-              if can_serve_req(new_candidate, max_diameter, data_reduced):
-                shared_map[next_card].append(new_candidate)
-
+      # generating a dictionary of common prefixes to group the elements 
+      groups = dict()
+      for p in prev_list: 
+         # exclude the last element and put the prefix in 
+         groups.setdefault(p[:-1], set()).add(p[-1])  # to make sure that everything is unique
+      # form the new candidates
+      for prefix, last in groups.items(): 
+         # this means that we just tack both of them on 
+         # if there is only one we can't create a new size
+        if len(last) == 2: 
+          new_candidate.append(prefix + tuple(sorted(last)))
+        if len(last) > 2:
+          # forming the new pairs
+          for pair in itertools.combinations(last, 2): 
+            new_candidate.append(prefix + pair)
+      
+      # now that we have a whole new candidate that we can use we can then check if they are valid 
+      for candidate in new_candidate: 
+         # now we try all the different orders to see what works in terms of serving the request
+         for order in itertools.combinations(candidate, next_card): 
+            # i think a part of the optimization problem is just the sheer number of combinations we have to test
+            if can_serve_req(order, max_diameter, data_reduced):
+              shared_map[next_card].append(order)
+            
       final_results.extend(shared_map[next_card])
       cardinality += 1
     return final_results
@@ -151,7 +149,7 @@ def main():
     data_reduced.reset_index(drop=True, inplace=True)
     print(data_reduced)
 
-    lst = generate_shared_trips_more(len(data_reduced), 3, 5, data_reduced)
+    lst = generate_shared_trips_more(len(data_reduced), 4, 5, data_reduced)
     print(lst)
     print(len(lst))
 
