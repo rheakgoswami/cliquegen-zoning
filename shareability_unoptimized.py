@@ -3,7 +3,7 @@ from geopy.distance import geodesic
 from itertools import permutations
 import itertools
 from shapely.wkt import loads
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, MultiPoint
 import numpy as np
 import os
 
@@ -58,7 +58,47 @@ def generate_realistic_data():
     synthetic_df = pd.DataFrame(rows)
     synthetic_df.to_csv('new_synthetic_data_realistic.csv', index=False)
 
+# precompute the dictionary of the origins and destinations
+def pre_computations(no_of_trips, data_reduced):
+  origins = dict()
+  dest = dict() 
+  distance = dict()
+  for trip in range(no_of_trips): 
+    o = (data_reduced.loc[trip, 'origin_loc_lat'], data_reduced.loc[trip, 'origin_loc_lon'])
+    d = (data_reduced.loc[trip, 'dest_loc_lat'], data_reduced.loc[trip, 'dest_loc_lon'])
+    origins[trip] = Point(o)
+    dest[trip] = Point(d)
+    distance[trip] = data_reduced.loc[trip, 'distance_kilometers']
+  return origins, dest, distance
 
+# convex hull helper function 
+def convex_hull_extend(clique, origins, dest, no_of_trips):
+  # origins and dest are calculated before hand 
+  extension = False
+  points = []
+  # BUG - points is never acucumulated with the clique trips
+  for trip in clique: 
+    points.append(origins[trip])
+    points.append(dest[trip])
+
+  # base case 
+  if len(points) == 0: 
+    return clique # this is because we do not have any points so clique must be len 0
+  
+  # create the convex hull 
+  convex_hull = MultiPoint(points).convex_hull 
+  # create the set that will have all the points that have to be grouped together 
+  extend_set = set(clique)
+  # checks for all the possible trips that could be encapsulated 
+  for trip in range(no_of_trips):
+    if trip not in clique: 
+      # this means that the trip is encapsualted by the hull 
+      if convex_hull.contains(origins[trip]) and convex_hull.contains(dest[trip]):
+        extend_set.add(trip)
+        print("trip extended!")
+        # later we can set a bool to basically add it to a special "extended" array
+        extension = True
+  return tuple(sorted(extend_set))
 
 def reduce(df, major_length):
   return df[df['distance_kilometers'] <= major_length]
@@ -95,6 +135,8 @@ def can_serve_req(requests, max_diameter, data_reduced):
 
 # the implementation seems to be okay - feasibility is not determined correctly
 def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_reduced):
+    # pre-computations and set up 
+    origins, dest, dist = pre_computations(no_of_trips, data_reduced)
     shared_map = {}
     final_results = []
     cardinality = 2
@@ -103,9 +145,15 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
     shared_map[2] = []
     # combinations already makes it so that order does not matter
     # forming the base foundation of the cliques of size 2
-    for requests in itertools.combinations(range(no_of_trips), 2):
-      if can_serve_req(requests, max_diameter, data_reduced):
-        shared_map[2].append(requests)
+    for clique in itertools.combinations(range(no_of_trips), 2):
+      if can_serve_req(clique, max_diameter, data_reduced):
+        # if we can serve these two trips 
+        # what can be added with convex hull 
+        extended_clique = convex_hull_extend(clique, origins, dest, no_of_trips)
+        # well we need to add it to the correct length lowkey LOL which may not always be shared_map[2]
+        # well technically actually we do not
+        # since we are "encapsulating" cliques that are actually of size 2 but becom bigger
+        shared_map[2].append(extended_clique)
     final_results.extend(shared_map[2])
     print("cardinality 2 complete")
 
@@ -116,6 +164,8 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
 
       # prepare prev candidates for efficient look up
       prev_list = shared_map[cardinality-1]
+      # possible new candidates that we need to check basically
+      # we could 
       new_candidate = []
 
       # generating a dictionary of common prefixes to group the elements 
@@ -135,13 +185,13 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
             new_candidate.append(prefix + pair)
       
       # now that we have a whole new candidate that we can use we can then check if they are valid 
-      for candidate in new_candidate: 
-         # now we try all the different orders to see what works in terms of serving the request
-         for order in itertools.combinations(candidate, cardinality): 
-            # i think a part of the optimization problem is just the sheer number of combinations we have to test
-            if can_serve_req(order, max_diameter, data_reduced):
-              shared_map[cardinality].append(order)
-            
+      for clique in new_candidate:
+        # i think a part of the optimization problem is just the sheer number of combinations we have to test
+        # removed the number of combinations because we actually do not need to worry about that since serve_req handles that 
+        if can_serve_req(clique, max_diameter, data_reduced):
+          # we do the same extension that we did above 
+          extended_clique = convex_hull_extend(clique, origins, dest, no_of_trips)
+          shared_map[cardinality].append(clique)
       final_results.extend(shared_map[cardinality])
       print(cardinality, "cardinality done")
     return final_results
@@ -166,19 +216,28 @@ def main():
     data_reduced.reset_index(drop=True, inplace=True)
     print(data_reduced)
 
-    lst = generate_shared_trips_more(len(data_reduced), 3, 5, data_reduced)
+    lst = generate_shared_trips_more(len(data_reduced), 3, 7, data_reduced)
     print(lst)
     print(len(lst))
 
+    counter_2 = 0
     counter_3 = 0
     counter_4 = 0
+    counter_5 = 0
     for i in lst:
+        if len(i) == 2: 
+            counter_2 += 1
         if len(i) == 3:
             counter_3 += 1
-        if len(i) == 4: 
+        if len(i) == 4:
             counter_4 += 1
+        if len(i) == 5: 
+            counter_5 += 1
+    print("Counter 2:", counter_2)
     print("Counter 3:", counter_3)
     print("Counter 4:", counter_4)
+    print("Counter 5:", counter_5)
+    print(counter_2 + counter_3 + counter_4 + counter_5)
 
 if __name__ == "__main__":
     main()
