@@ -2,6 +2,7 @@ certifi==2025.1.31
 geographiclib==2.0
 geopandas==1.0.1
 geopy==2.4.1
+gurobipy==12.0.1
 numpy==2.2.4
 packaging==24.2
 pandas==2.2.3
