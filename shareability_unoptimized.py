@@ -9,131 +9,306 @@ import os
 import gurobipy as gp
 from gurobipy import GRB
 from gurobipy import Model, GRB, quicksum
+from scipy.spatial import Delaunay
+import numpy as np
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import networkx as nx
+from rtree import index  # For efficient spatial adjacency search
+import geopandas as gpd
+from shapely.geometry import Point
+import math
 
-# changed data generation function 
-def generate_realistic_data():
-    file_path = os.path.join(os.path.dirname(__file__), "lodes_2021-01-04.csv")
-    df = pd.read_csv(file_path)
+def generate_delaunary_graph(num_nodes, width, one_way_prob = 0.2, edge_ratio = 0.8):
 
-    # Select ~15 cluster centers (mimicking urban/suburban hubs)
-    num_clusters = 15
-    cluster_centers = df.sample(n=num_clusters)[["origin_loc_lat", "origin_loc_lon"]].values
+    """
+    Generate a random directed graph with a road-like structure using Delaunay triangulation.
+    Parameters
+    ----------
+    num_nodes : int
+        Number of intersections (nodes).
+    width : float
+        Width of the unit square.
+    one_way_prob : float
+        Probability that a road is one-way.
+    edge_ratio : float
+        Probability of keeping additional edges from Delaunay triangulation.
+    Returns
+    -------
+    H : networkx.DiGraph
+        Directed graph representing the road-like structure
+    """
 
-    rows = []
 
-    for center_lat, center_lon in cluster_centers:
-        for _ in range(20):  # 20 trips per cluster
+    # Generate random node positions in a unit square
+    points = np.random.rand(num_nodes, 2) * width
 
-            # Assign total_jobs (trip intensity)
-            total_jobs = np.random.randint(1, 101)
+    # Compute Delaunay triangulation (planar by definition)
+    tri = Delaunay(points)
+    H = nx.DiGraph()  # Directed graph
 
-            # Pick origin near the cluster center (small dispersion)
-            origin_radius_km = np.random.uniform(0.1, 1.5)
-            origin_lat_shift = np.random.uniform(-1, 1) * origin_radius_km / 111  # ~111 km per degree lat
-            origin_lon_shift = np.random.uniform(-1, 1) * origin_radius_km / (111 * np.cos(np.radians(center_lat)))
-            origin_lat = center_lat + origin_lat_shift
-            origin_lon = center_lon + origin_lon_shift
+    # Add nodes with positions
+    for i, (x, y) in enumerate(points):
+        H.add_node(i, pos=(x, y))
 
-            # Assign a realistic destination distance
-            rand_val = np.random.rand()
-            if rand_val < 0.6:
-                trip_distance_km = np.random.uniform(1, 3)
-            elif rand_val < 0.9:
-                trip_distance_km = np.random.uniform(3, 8)
-            else:
-                trip_distance_km = np.random.uniform(8, 20)
+    # Add edges from Delaunay triangulation (planar)
+    for simplex in tri.simplices:
+        for i in range(3):
+            u, v = int(simplex[i]), int(simplex[(i + 1) % 3])  # Convert to Python int
+            dist = np.linalg.norm(points[u] - points[v])
 
-            # Perturb destination
-            angle = np.random.uniform(0, 2 * np.pi)
-            dest_lat = origin_lat + (trip_distance_km / 111) * np.sin(angle)
-            dest_lon = origin_lon + (trip_distance_km / (111 * np.cos(np.radians(origin_lat)))) * np.cos(angle)
+            # Randomly assign one-way or two-way road
+            if np.random.rand() < one_way_prob:  # One-way road
+                H.add_edge(u, v, weight=dist)
+            else:  # Two-way road
+                H.add_edge(u, v, weight=dist)
+                H.add_edge(v, u, weight=dist)  # Add reverse edge for two-way road
 
-            rows.append({
-                "total_jobs": total_jobs,
-                "origin_loc_lat": origin_lat,
-                "origin_loc_lon": origin_lon,
-                "dest_loc_lat": dest_lat,
-                "dest_loc_lon": dest_lon,
-                "origin_geom": f"POINT ({origin_lon} {origin_lat})",
-                "dest_geom": f"POINT ({dest_lon} {dest_lat})",
-            })
+    # Sparsify, but keep some extra edges to make it denser
+    edges = list(H.edges())
+    np.random.shuffle(edges)
+    for u, v in edges:
+        if np.random.rand() > edge_ratio:  # Randomly remove edges with some probability
+            weight = H[u][v]['weight']  # Save the weight before removing the edge
+            H.remove_edge(u, v)
+            if not nx.is_strongly_connected(H):  # Ensure the graph remains weakly connected
+                H.add_edge(u, v, weight=weight)  # Restore the edge with its weight
 
-    synthetic_df = pd.DataFrame(rows)
-    synthetic_df.to_csv('new_synthetic_data_realistic.csv', index=False)
+    return H
+
+def compute_shortest_path_distances(H, power = 2):
+
+    """
+    Compute shortest path distances raised to the power.
+    Parameters:
+    -----------
+    H : networkx.DiGraph
+        Directed graph.
+    power : int
+        Power to raise the shortest path distances.
+
+    Returns:
+    --------
+    cost_dict : dict
+        Dictionary of shortest path distances raised to the power
+    """
+
+
+    if H is not None:
+
+        shortest_distances = dict(nx.all_pairs_dijkstra_path_length(H, weight='weight'))
+        cost_dict = {key: {inner_key: value**power for inner_key, value in inner_dict.items()}
+                     for key, inner_dict in shortest_distances.items()}
+
+    return cost_dict
+
+def generate_od_demand_mixed(H, cluster_centers, cluster_radius, is_cluster=True, is_uniform=True, cluster_factor=1):
+
+    """
+    Generates origin-destination demand within multiple overlapping clusters and assigns random demand outside the clusters.
+
+    Parameters:
+    - H: NetworkX graph with 'pos' node attributes
+    - cluster_centers: List of cluster centers in [(x1, y1), (x2, y2), ...]
+    - cluster_radius: List of radii for each cluster
+    - outside_demand: Boolean indicating whether to generate uniform demand outside clusters
+
+    Returns:
+    - demand: Dictionary containing intra-cluster and external demand.
+    - cluster_map: Dictionary mapping each node to its assigned clusters.
+    """
+
+    nodes = list(H.nodes())
+    pos = {n: np.array(H.nodes[n]['pos']) for n in nodes}
+    demand = defaultdict(lambda: defaultdict(int))
+
+    if is_cluster:
+        cluster_map = defaultdict(list)
+
+        # Assign nodes to multiple clusters
+        for n in nodes:
+            for c, r in zip(cluster_centers, cluster_radius):
+                if np.linalg.norm(pos[n] - np.array(c)) <= r:
+                    cluster_map[n].append(tuple(c))
+
+        # Create intra-cluster demand for each cluster separately
+        clusters = {tuple(center): [] for center in cluster_centers}
+        for n, centers in cluster_map.items():
+            for center in centers:
+                clusters[center].append(n)
+
+        for cluster_nodes in clusters.values():
+            for i in cluster_nodes:
+                for j in cluster_nodes:
+                    if i != j:
+                        demand[i][j] += cluster_factor * np.random.rand()  # Accumulate demand for nodes in multiple clusters
+
+    # Assign uniform demand outside clusters
+    if is_uniform:
+        for i in nodes:
+            for j in nodes:
+                if i != j:
+                    demand[i][j] += np.random.rand()  # Lower magnitude than intra-cluster demand
+
+    return demand, cluster_map
+
+def visualize_demand_pattern(H, demand, filename="demand_pattern.png"):
+    """
+    Visualize the demand pattern on a graph.
+
+    Parameters:
+    - H: NetworkX graph with 'pos' node attributes
+    - demand: Dictionary containing demand between nodes
+    - filename: Output filename for the plot
+    """
+    pos = nx.get_node_attributes(H, 'pos')
+    nodes = list(H.nodes())
+
+    total_demand = {n: 0 for n in nodes}
+    for i in demand:
+        for j in demand[i]:
+            total_demand[i] += demand[i][j]  # Outgoing demand
+            total_demand[j] += demand[i][j]  # Incoming demand
+
+    max_demand = max(total_demand.values(), default=1)
+    node_colors = [total_demand[n] / max_demand for n in nodes]
+
+    x_vals = [pos[n][0] for n in nodes]
+    y_vals = [pos[n][1] for n in nodes]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(x_vals, y_vals, c=node_colors, cmap='viridis', s=50, alpha=0.7)
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label('Demand Level')
+    ax.set_title("Demand Heatmap")
+
+    plt.savefig(filename)
+    plt.close()
+
+def generate_dataframe(H, demand, cost_dist):
+    """
+    Visualize the demand pattern on a graph.
+
+    Parameters:
+    - H: NetworkX graph with 'pos' node attributes
+    - demand: Dictionary containing demand between nodes
+    - filename: Output filename for the plot
+    """
+    pos = nx.get_node_attributes(H, 'pos')
+    edges = list(H.edges())
+    data = []
+    max_dist = 0
+    info = {}
+
+    for o, d in edges:
+      entry = {'trip1': o, 'trip2': d, 'origin': (pos[o][0], pos[o][1]), 'dest': (pos[d][0], pos[d][1]), 'dist': cost_dist[o][d],
+              'demand': demand[o][d]}
+      info[(pos[o][0], pos[o][1])] = o
+      info[(pos[d][0], pos[d][1])] = d
+      if cost_dist[o][d] > max_dist:
+        max_dist = cost_dist[o][d]
+      data.append(entry)
+
+    df = pd.DataFrame(data)
+    return df, max_dist, info
 
 # precompute the dictionary of the origins and destinations
 def pre_computations(no_of_trips, data_reduced):
   origins = dict()
-  dest = dict() 
-  distance = dict()
-  for trip in range(no_of_trips): 
-    o = (data_reduced.loc[trip, 'origin_loc_lat'], data_reduced.loc[trip, 'origin_loc_lon'])
-    d = (data_reduced.loc[trip, 'dest_loc_lat'], data_reduced.loc[trip, 'dest_loc_lon'])
+  dest = dict()
+  benefit = dict()
+  for trip in range(no_of_trips):
+    o = (data_reduced.loc[trip, 'origin'])
+    d = (data_reduced.loc[trip, 'dest'])
     origins[trip] = Point(o)
     dest[trip] = Point(d)
-    distance[trip] = data_reduced.loc[trip, 'distance_kilometers']
-  return origins, dest, distance
+  return origins, dest
 
-# convex hull helper function 
-def convex_hull_extend(clique, origins, dest, no_of_trips):
-  # origins and dest are calculated before hand 
+# convex hull helper function
+def convex_hull_extend(clique, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold):
+  # origins and dest are calculated before hand
   extension = False
   points = []
   # BUG - points is never acucumulated with the clique trips
-  for trip in clique: 
+  for trip in clique:
     points.append(origins[trip])
     points.append(dest[trip])
 
-  # base case 
-  if len(points) == 0: 
+  # base case
+  if len(points) == 0:
     return clique # this is because we do not have any points so clique must be len 0
-  
-  # create the convex hull 
-  convex_hull = MultiPoint(points).convex_hull 
-  # create the set that will have all the points that have to be grouped together 
+
+  # create the convex hull
+  convex_hull = MultiPoint(points).convex_hull
+  # create the set that will have all the points that have to be grouped together
   extend_set = set(clique)
-  # checks for all the possible trips that could be encapsulated 
+  # checks for all the possible trips that could be encapsulated
   for trip in range(no_of_trips):
-    if trip not in clique: 
-      # this means that the trip is encapsualted by the hull 
+    if trip not in clique:
+      # this means that the trip is encapsualted by the hull
       if convex_hull.contains(origins[trip]) and convex_hull.contains(dest[trip]):
         extend_set.add(trip)
-        print("trip extended!")
-        # later we can set a bool to basically add it to a special "extended" array
-        extension = True
-  return tuple(sorted(extend_set))
+  # we should only return the extend_set if that is also "serveable"
+  extended = tuple(sorted(extend_set))
+  if clique == extended:
+    return clique
+  if can_serve_quasi_req(extended, max_diameter, data_reduced, info, distances, connectivity_threshold):
+    return extended
+  return clique
 
+# pre-processing step to remove the "major" lines
 def reduce(df, major_length):
-  return df[df['distance_kilometers'] <= major_length]
+  return df[df['dist'] <= major_length]
 
 # Determines if a set of trips can be feasibly shared by checking the total travel distance.
 # can be optimized further
-def can_serve_req(requests, max_diameter, data_reduced):
+def can_serve_req(requests, max_diameter, data_reduced, info, cost_dist):
     if len(requests) < 2:
         return False
 
     trip_data = [data_reduced.loc[req] for req in requests]
 
-    # can serve requests needs to be done in a way that we find the maximum distance between any two points in the trip 
+    # can serve requests needs to be done in a way that we find the maximum distance between any two points in the trip
     # Extract origin and destination points
-    locations = [(trip['origin_loc_lat'], trip['origin_loc_lon']) for trip in trip_data] + \
-                [(trip['dest_loc_lat'], trip['dest_loc_lon']) for trip in trip_data]
-    print(locations)
+    locations = [trip['origin'] for trip in trip_data] + \
+                [trip['dest'] for trip in trip_data]
     # we need to try two combinations of all pairs of locations and return the max
-    maximum = 0 
+    maximum = 0
     for combo in itertools.combinations(locations, 2):
-        dist = sum(geodesic(combo[i], combo[i + 1]).km for i in range(len(combo) - 1))
+        dist = cost_dist[info[combo[0]]][info[combo[1]]]
         # return the first instance that satisfies both constraints
-        # counts it out in the first go so probably there are a lot more 
+        # counts it out in the first go so probably there are a lot more
         # it needs to be actually worth it to share the trips
         if maximum < dist:
-            maximum = dist 
-    return maximum <= max_diameter 
+            maximum = dist
+    return maximum <= max_diameter
+
+def can_serve_quasi_req(requests, max_diameter, data_reduced, info, cost_dist, connectivity_threshold):
+    n = len(requests)
+    if n < 3:
+        return False
+
+    valid_edges = 0
+    total_pairs = 0
+
+    # Evaluate every unique pair in the candidate.
+    for node1, node2 in itertools.combinations(requests, 2):
+        total_pairs += 1
+        if can_serve_req((node1, node2), max_diameter, data_reduced, info, cost_dist):
+            valid_edges += 1
+
+    # The required number of valid edges is the connectivity threshold times the total possible pairs.
+    required_edges = math.ceil(connectivity_threshold * total_pairs)
+
+    return valid_edges >= required_edges
 
 # the implementation seems to be okay - feasibility is not determined correctly
-def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_reduced):
-    # pre-computations and set up 
-    origins, dest, dist = pre_computations(no_of_trips, data_reduced)
+# we want to modify generate_shared_trips to basically find the highest cardinality of cliques it can form within a diameter and not be limited by an arg
+# a brute force way to do it is like we keep on increasing cardinality until we have a shared_map[cardinality] has length 0
+def generate_shared_trips_more(no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold):
+    # pre-computations and set up
+    not_empty = False # this is to basically do the brute force way because you can't create the next step if there is nothing to share
+    origins, dest = pre_computations(no_of_trips, data_reduced)
     shared_map = {}
     final_results = []
     cardinality = 2
@@ -143,144 +318,213 @@ def generate_shared_trips_more(no_of_trips, max_cardinality, max_diameter, data_
     # combinations already makes it so that order does not matter
     # forming the base foundation of the cliques of size 2
     for clique in itertools.combinations(range(no_of_trips), 2):
-      if can_serve_req(clique, max_diameter, data_reduced):
-        # if we can serve these two trips 
-        # what can be added with convex hull 
-        extended_clique = convex_hull_extend(clique, origins, dest, no_of_trips)
-        # well we need to add it to the correct length lowkey LOL which may not always be shared_map[2]
-        # well technically actually we do not
-        # since we are "encapsulating" cliques that are actually of size 2 but becom bigger
-        shared_map[2].append(extended_clique)
-    final_results.extend(shared_map[2])
+      # we can stick to can_serve request in this case bc we are assuming that the connectivity constraint will always be greater than 50%
+      if can_serve_req(clique, max_diameter, data_reduced, info, distances):
+        # if we can serve these two trips
+        # what can be added with convex hull
+        extended_clique = sorted(convex_hull_extend(clique, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold))
+        shared_map[2].append(tuple(extended_clique))
+    if len(shared_map[2]) > 0:
+      not_empty = True
+      final_results.extend(shared_map[2])
     print("cardinality 2 complete")
 
     # build candidates for cardinality > 2
-    while cardinality != max_cardinality:
+    while not_empty:
       cardinality += 1
       shared_map[cardinality] = []
 
       # prepare prev candidates for efficient look up
       prev_list = shared_map[cardinality-1]
-      # possible new candidates that we need to check basically
-      # we could 
-      new_candidate = []
 
-      # generating a dictionary of common prefixes to group the elements 
+      # generating a dictionary of common prefixes to group the elements
       groups = dict()
-      for p in prev_list: 
-         # exclude the last element and put the prefix in 
-         groups.setdefault(p[:-1], set()).add(p[-1])  # to make sure that everything is unique
+      for p in prev_list:
+         # exclude the last element and put the prefix in
+         groups.setdefault(tuple(p[:-1]), set()).add(p[-1])  # to make sure that everything is unique
       # form the new candidates
-      for prefix, last in groups.items(): 
-         # this means that we just tack both of them on 
-         # if there is only one we can't create a new size
-        if len(last) == 2: 
-          new_candidate.append(prefix + tuple(sorted(last)))
+      for prefix, last in groups.items():
+        base_length = len(prefix)
+        if len(last) == 2:
+          candidate = prefix + tuple(sorted(last))
+          if can_serve_quasi_req(candidate, max_diameter, data_reduced, info, distances, connectivity_threshold):
+            extended_clique = convex_hull_extend(candidate, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold)
+            shared_map[cardinality].append(tuple(extended_clique))
         if len(last) > 2:
           # forming the new pairs
-          for pair in itertools.combinations(last, 2): 
-            new_candidate.append(prefix + pair)
-      
-      # now that we have a whole new candidate that we can use we can then check if they are valid 
-      for clique in new_candidate:
-        # i think a part of the optimization problem is just the sheer number of combinations we have to test
-        # removed the number of combinations because we actually do not need to worry about that since serve_req handles that 
-        if can_serve_req(clique, max_diameter, data_reduced):
-          # we do the same extension that we did above 
-          extended_clique = convex_hull_extend(clique, origins, dest, no_of_trips)
-          shared_map[cardinality].append(clique)
-      final_results.extend(shared_map[cardinality])
+          for pair in itertools.combinations(last, 2):
+            candidate = prefix + tuple(sorted(pair))
+            if can_serve_quasi_req(candidate, max_diameter, data_reduced, info, distances, connectivity_threshold):
+              extended_clique = convex_hull_extend(candidate, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold)
+              shared_map[cardinality].append(tuple(extended_clique))
+
+      # # now that we have a whole new candidate that we can use we can then check if they are valid
+      # for clique in new_candidate:
+      #   # quasi clique generation takes place here
+      #   if can_serve_req(clique, max_diameter, data_reduced, info, distances):
+      #     # we do the same extension that we did above
+      #     extended_clique = convex_hull_extend(clique, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info)
+      #     shared_map[cardinality].append(extended_clique)
+      if len(shared_map[cardinality]) > 0:
+        not_empty = True
+        final_results.extend(shared_map[cardinality])
+        print("definitely moving onto cardinality", cardinality + 1)
+      else:
+        not_empty = False # this means that we no longer can extend
       print(cardinality, "cardinality done")
-    return final_results
+    return final_results, cardinality-1
+
+def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
+
+    """
+    Visualize the selected zones on a graph.
+
+    Parameters:
+    - H: NetworkX graph with 'pos' node attributes
+    - zones: List of selected zones, where each zone is a list of node indices
+    - filename: Output filename for the plot
+    """
+
+
+    # Graph node positions
+    pos = nx.get_node_attributes(H, 'pos')
+
+    # Generate a dynamic list of colors
+    cmap = plt.get_cmap("tab10")
+    zone_colors = [cmap(i) for i in range(len(zones))]
+
+    # Identify all nodes that are not part of any zone using H.nodes()
+    all_zone_nodes = set(node for zone in zones for node in zone)
+    non_zone_nodes = set(H.nodes()) - all_zone_nodes
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Plot the nodes not part of any zone in gray (from H.nodes())
+    non_zone_x_vals = [pos[node][0] for node in non_zone_nodes]
+    non_zone_y_vals = [pos[node][1] for node in non_zone_nodes]
+    ax.scatter(non_zone_x_vals, non_zone_y_vals, color='gray', s=50, label="Non-Zone Nodes", edgecolor='black', alpha=0.5)
+
+    # Plot each zone with a different color
+    for i, zone in enumerate(zones):
+        zone_nodes = [node for node in zone if node in pos]
+        if zone_nodes:  # Only plot if there are nodes in the current zone
+            x_vals_zone = [pos[node][0] for node in zone_nodes]
+            y_vals_zone = [pos[node][1] for node in zone_nodes]
+            ax.scatter(x_vals_zone, y_vals_zone, color=zone_colors[i], s=100, label=f"Zone {i+1}", edgecolor='black', alpha=0.7)
+
+    # Title and legend
+    ax.set_title("Selected Zones Visualization")
+    ax.legend()
+
+    # Save the plot instead of showing it
+    plt.savefig(filename)
+    plt.close()
 
 def main(): 
-    filepath = os.path.join(os.path.dirname(__file__), "new_synthetic_data_realistic_short.csv")
-    df = pd.read_csv(filepath)
+  # Random seed
+  seed = 42
+  np.random.seed(seed)
 
-    # Displaying the first few rows of the DataFrame
-    len_trips = 300
-    data = df.head(len_trips)
-    data['origin_geom'] = data['origin_geom'].apply(loads)
-    data['dest_geom'] = data['dest_geom'].apply(loads)
-    data['line'] = data.apply(lambda x: LineString([x['origin_geom'], x['dest_geom']]),axis=1)
-    data['distance_kilometers'] = data.apply(lambda x: geodesic((x['origin_geom'].y, x['origin_geom'].x),
-                        (x['dest_geom'].y, x['dest_geom'].x)).meters/1000, axis=1)
-    print(data)
+  # Generate the graph
+  G = generate_delaunary_graph(60, 10, one_way_prob=0.2, edge_ratio=0.8)
 
-    # pre-processing (not as relevant)
-    major_length = 5
-    data_reduced = reduce(data, major_length)
-    data_reduced.reset_index(drop=True, inplace=True)
-    print(data_reduced)
+  # Compute shortest path distances
+  distances = compute_shortest_path_distances(G)
 
-    lst = generate_shared_trips_more(len(data_reduced), 3, 7, data_reduced)
-    print(lst)
-    print(len(lst))
+  # Generate demand with a mixed distribution (clusters + uniform)
+  centers = [(1.8, 6.3), (2.8, 2), (9.5, 3.8)]
+  radius = [1, 1, 1]
+  demand, _ = generate_od_demand_mixed(G, centers, radius, cluster_factor=10)
+  visualize_demand_pattern(G, demand, filename="demand_pattern.png")
 
-    counter_2 = 0
-    counter_3 = 0
-    counter_4 = 0
-    counter_5 = 0
-    for i in lst:
-        if len(i) == 2: 
-            counter_2 += 1
-        if len(i) == 3:
-            counter_3 += 1
-        if len(i) == 4:
-            counter_4 += 1
-        if len(i) == 5: 
-            counter_5 += 1
-    print("Counter 2:", counter_2)
-    print("Counter 3:", counter_3)
-    print("Counter 4:", counter_4)
-    print("Counter 5:", counter_5)
-    print(counter_2 + counter_3 + counter_4 + counter_5)
+  data, max_dist, info = generate_dataframe(G, demand, distances)
+  print(data)
+  print(max_dist)
 
-    # optimization based on the lst
-    # for max cardinality 3 and max diameter = 7 w/ convex hull changes
-    lst = [(0, 1), (0, 2), (0, 3), (0, 4), (0, 6), (0, 4, 7), (0, 8), (0, 9), (0, 11), (0, 12), (0, 13), (1, 3), (1, 4), (1, 7), (1, 8), (1, 9), (1, 10, 12), (1, 11), (1, 12), (2, 4), (2, 9), (3, 4), (3, 5), (3, 6), (3, 7), (3, 8), (3, 9), (3, 10, 12), (3, 11), (3, 12), (4, 6), (4, 7), (4, 9), (4, 11), (5, 9), (6, 8), (6, 13), (6, 192, 199), (6, 194, 199), (6, 199), (7, 8), (7, 10, 12), (7, 11), (7, 12), (9, 12), (10, 11, 12), (10, 12), (11, 12), (14, 16), (14, 19), (14, 25), (15, 20, 22, 28), (15, 22, 28), (15, 23, 28), (15, 24, 28), (15, 25, 28), (15, 26), (15, 28), (15, 22, 28, 29), (16, 17), (16, 20, 24), (16, 23), (16, 25), (16, 27), (16, 29), (16, 88), (17, 23), (17, 24, 25), (17, 25), (17, 25, 26), (16, 17, 27), (17, 29), (18, 19), (18, 21), (19, 21), (20, 22), (20, 23, 24), (20, 24), (20, 22, 25), (20, 26), (20, 22, 28), (20, 29), (21, 23), (22, 24), (22, 26), (22, 28), (22, 29), (23, 24), (23, 25), (23, 26), (23, 29), (24, 25), (24, 26), (24, 29), (25, 26), (25, 29), (26, 28), (26, 29), (27, 88), (30, 33), (30, 41), (30, 104), (30, 117), (30, 143), (31, 35), (31, 39), (31, 106), (31, 109), (32, 39, 118), (32, 40), (32, 41, 114), (32, 42, 114, 118), (32, 43), (32, 105, 118), (32, 106, 112), (32, 108), (32, 109), (32, 110, 118), (32, 111), (32, 112), (32, 113), (32, 114), (32, 117), (32, 118), (32, 134), (32, 137), (32, 107, 114, 118, 138), (32, 139), (32, 141), (32, 118, 143), (32, 145), (33, 34, 38), (33, 39), (33, 40, 105, 111, 114), (30, 33, 41), (33, 42), (33, 104, 111, 114), (33, 105), (33, 110), (33, 114), (33, 34, 38, 116), (30, 33, 117), (30, 33, 118), (30, 33, 118, 143), (34, 38), (34, 42), (34, 110), (34, 116), (35, 106), (35, 112), (36, 38), (36, 39), (36, 40), (36, 43), (36, 109), (36, 110), (36, 116), (37, 40), (37, 106), (37, 112), (37, 115), (38, 39), (38, 40), (38, 41), (38, 42), (38, 104), (38, 105), (38, 110), (38, 116), (38, 118, 143), (39, 41), (39, 43), (39, 105), (39, 109), (39, 110), (39, 114), (39, 116), (39, 118), (39, 118, 143), (40, 41, 111, 114), (40, 42), (40, 43), (40, 104, 111, 114), (40, 105), (40, 109), (40, 110), (40, 115), (40, 116), (40, 141), (40, 145), (41, 104, 114), (41, 105), (41, 107), (41, 108, 114), (41, 110), (41, 111, 114), (41, 114), (34, 38, 41, 116), (41, 117), (41, 118), (41, 118, 143), (42, 104), (42, 107), (42, 108), (42, 110), (42, 111), (42, 114), (38, 42, 116), (42, 118), (42, 107, 138), (42, 118, 143), (43, 104, 105, 111, 114), (43, 106, 112), (43, 108), (43, 109), (43, 110), (43, 112), (43, 113), (43, 115), (43, 116), (43, 141), (32, 43, 118, 143), (43, 145), (44, 45), (44, 51), (44, 52), (44, 53), (44, 54), (44, 55), (44, 56), (44, 57), (44, 49, 58), (44, 45, 59), (45, 48), (45, 55), (45, 58), (46, 47), (46, 49), (46, 50), (46, 56), (46, 57), (46, 49, 57, 58), (47, 49), (47, 50), (47, 54), (47, 56), (47, 57), (47, 59), (48, 59), (49, 50), (49, 56), (49, 57), (49, 58), (49, 59), (50, 54), (50, 56), (50, 59), (51, 52), (51, 54), (51, 55), (51, 58), (52, 54), (52, 57), (49, 52, 58), (52, 59), (53, 55), (54, 56), (54, 59), (55, 58), (55, 59), (56, 57), (49, 56, 57, 58), (57, 58), (57, 59), (49, 58, 59), (60, 63), (60, 64), (60, 68), (60, 71), (60, 63, 74), (61, 66), (61, 68), (61, 69, 71), (61, 72), (61, 74), (62, 64), (62, 65), (62, 67), (62, 68), (63, 66), (63, 68), (63, 71), (63, 74), (64, 65), (64, 67), (64, 68), (64, 70), (64, 72, 74), (65, 67), (66, 69), (66, 71), (66, 72), (66, 74), (67, 68), (68, 70), (68, 71), (68, 72), (63, 68, 74), (69, 71), (69, 74), (70, 72), (70, 73), (70, 74), (71, 74), (72, 74), (75, 83), (76, 78), (76, 79), (77, 80), (77, 84), (77, 89), (78, 79), (78, 84, 87, 89), (78, 88), (79, 84), (79, 87), (79, 89), (80, 84), (80, 89), (81, 82), (81, 85), (82, 84), (82, 85), (83, 88), (84, 85), (84, 86), (84, 87), (84, 89), (85, 87), (85, 89), (86, 89), (87, 89), (90, 91), (90, 92), (90, 93), (90, 94), (90, 95), (90, 96), (90, 100), (90, 101), (90, 102), (91, 96), (91, 99), (92, 93), (92, 93, 94), (92, 93, 95), (92, 98), (93, 94), (93, 95), (93, 98), (93, 94, 95), (94, 96), (94, 98), (94, 100), (94, 102), (95, 96), (95, 98), (95, 99), (95, 100), (93, 95, 102), (96, 99), (96, 101), (96, 102), (92, 98, 102), (99, 101), (99, 102), (101, 102), (104, 105), (104, 107), (104, 108), (104, 111), (104, 112), (104, 113), (104, 114), (104, 115), (38, 104, 116), (104, 117), (104, 107, 138), (104, 108, 111, 141), (104, 118, 143), (105, 110), (105, 114), (105, 116), (105, 118), (105, 118, 143), (106, 109), (106, 112), (106, 112, 141), (106, 112, 145), (107, 118), (107, 138), (107, 143), (108, 111), (108, 113), (108, 114), (108, 115), (108, 117), (108, 118), (108, 141), (108, 118, 143), (108, 145), (109, 110), (109, 116), (110, 114), (110, 116), (110, 118, 143), (111, 114), (111, 118), (111, 141), (112, 113), (112, 141), (112, 145), (113, 115), (113, 139), (113, 141), (113, 118, 143), (113, 145), (114, 118), (114, 118, 143), (115, 141), (115, 145), (38, 116, 118, 143), (117, 118), (117, 133), (117, 135), (117, 136), (117, 138), (117, 142, 144), (117, 143), (117, 144), (107, 118, 138), (118, 143), (119, 124), (119, 125), (119, 130), (120, 122), (120, 124), (120, 126), (120, 128), (120, 129), (120, 130), (121, 122, 125), (121, 124, 125), (121, 125), (121, 126, 127), (121, 127), (121, 127, 128), (121, 127, 129), (121, 127, 131), (121, 183), (122, 128), (122, 129), (122, 130), (123, 126), (123, 128), (123, 129), (124, 125), (124, 126), (125, 127), (125, 128), (125, 183), (126, 127), (126, 128), (126, 129), (127, 128), (127, 131), (127, 183), (128, 129), (128, 130), (128, 183), (130, 183), (132, 135), (132, 136, 144), (132, 142), (132, 144), (133, 134), (133, 135), (133, 136), (133, 137), (133, 138), (133, 140), (133, 142), (133, 143), (133, 144), (134, 140), (134, 142), (134, 143), (134, 145), (135, 136), (135, 138), (135, 142), (135, 144), (136, 138), (136, 139), (136, 142, 144), (136, 144), (137, 139), (137, 140), (137, 141), (118, 137, 143), (137, 145), (107, 138, 143), (139, 141), (118, 139, 143), (139, 145), (140, 143), (32, 118, 141, 143), (141, 145), (142, 144), (32, 118, 143, 145), (146, 147), (146, 149), (146, 150), (146, 152), (146, 153), (146, 154), (146, 156), (146, 156, 158), (146, 159), (147, 148), (147, 149, 151), (147, 151), (147, 152), (147, 148, 154), (147, 155), (147, 156), (147, 157), (147, 156, 158, 159), (147, 159), (147, 160), (148, 154), (148, 156), (148, 157), (148, 156, 158), (148, 159), (149, 152), (148, 149, 154), (149, 155), (149, 159), (149, 160), (150, 152), (150, 153), (150, 154), (150, 156), (150, 156, 158), (151, 160), (152, 153), (152, 154), (152, 159), (152, 160), (153, 156), (153, 159), (154, 156), (154, 156, 158), (154, 159), (155, 158), (155, 160), (156, 158), (156, 159), (156, 158, 159), (156, 158, 159, 160), (161, 162), (161, 167), (161, 168), (161, 173), (162, 164), (162, 168), (162, 170), (162, 173), (163, 165), (163, 166), (163, 168), (163, 169), (163, 173), (164, 169), (164, 170), (165, 169), (165, 173), (167, 168), (167, 172), (168, 170), (168, 173), (169, 173), (171, 172), (174, 176, 188), (174, 178), (174, 181), (174, 182), (174, 185), (174, 187), (174, 188), (175, 178, 180), (175, 180), (176, 185), (176, 188), (177, 178), (177, 181), (177, 182), (177, 184), (178, 179), (178, 180), (178, 181), (178, 182), (178, 184), (174, 178, 185), (178, 186), (178, 188), (179, 186), (181, 182), (181, 184), (174, 181, 185), (177, 181, 186), (181, 187), (181, 188), (182, 184), (174, 182, 185), (182, 186), (184, 186), (185, 187), (185, 188), (187, 188), (189, 194), (189, 195), (189, 196), (189, 198), (190, 191), (190, 193), (190, 197), (190, 200), (191, 193), (191, 197), (192, 194, 199), (192, 195, 199), (192, 196), (192, 198, 199), (192, 199), (192, 200), (193, 197), (193, 200), (194, 196), (194, 199), (195, 196), (195, 198), (196, 200), (198, 200), (202, 206), (202, 207, 213), (202, 209, 215), (202, 210, 215), (202, 212), (202, 213), (202, 214), (202, 215), (202, 216), (203, 206), (204, 216), (205, 217), (206, 208), (206, 210, 211, 215), (206, 211), (206, 212), (206, 213), (206, 214), (206, 215), (206, 216), (206, 211, 215, 217), (207, 212), (207, 213), (207, 214), (208, 209), (208, 210), (208, 211), (208, 215), (209, 210), (209, 215), (209, 216), (209, 217), (210, 214), (210, 215), (210, 215, 216), (210, 217), (211, 215), (211, 216), (212, 216), (213, 214), (213, 216), (214, 217), (215, 216), (215, 217), (0, 1, 2), (0, 1, 3), (0, 1, 4), (0, 1, 8), (0, 1, 9), (0, 1, 11), (0, 1, 12), (0, 2, 4), (0, 2, 8), (0, 2, 9), (0, 2, 12), (0, 2, 13), (0, 3, 4), (0, 3, 8), (0, 3, 9), (0, 3, 11), (0, 3, 12), (0, 4, 6), (0, 4, 8), (0, 4, 9), (0, 4, 11), (0, 4, 12), (0, 4, 13), (0, 6, 13), (0, 8, 9), (0, 9, 12), (0, 11, 12), (1, 3, 4), (1, 3, 7), (1, 3, 8), (1, 3, 9), (1, 3, 11), (1, 3, 12), (1, 4, 7), (1, 4, 8), (1, 4, 11), (1, 4, 12), (1, 7, 11), (1, 7, 12), (1, 8, 12), (1, 9, 12), (1, 11, 12), (2, 4, 9), (3, 4, 5), (3, 4, 7), (3, 4, 8), (3, 4, 11), (3, 4, 12), (3, 5, 8), (3, 5, 9), (3, 5, 12), (3, 7, 11), (3, 7, 12), (3, 8, 11), (3, 8, 12), (3, 9, 12), (3, 11, 12), (4, 11, 7), (6, 8, 13), (6, 8, 199), (6, 13, 199), (7, 11, 12), (15, 26, 28), (16, 17, 25), (16, 17, 27), (16, 23, 25), (16, 23, 27), (16, 23, 29), (16, 88, 27), (16, 25, 27), (16, 25, 29), (16, 27, 29), (17, 25, 29), (17, 25, 23), (20, 24, 26), (20, 24, 29), (20, 24, 22), (20, 26, 29), (20, 26, 22), (20, 29, 22), (22, 24, 26), (22, 24, 28), (22, 24, 29), (22, 26, 28), (22, 26, 29), (22, 28, 29), (23, 24, 25), (23, 24, 26), (23, 24, 29), (23, 25, 26), (23, 25, 29), (23, 26, 29), (24, 25, 26), (24, 25, 29), (24, 26, 29), (25, 26, 29), (26, 28, 29), (30, 33, 104), (30, 33, 41), (30, 33, 143), (30, 33, 117), (30, 104, 41), (30, 104, 143), (30, 104, 117), (30, 41, 143), (30, 41, 117), (30, 143, 117), (31, 106, 35), (31, 106, 109), (31, 106, 39), (31, 35, 109), (31, 35, 39), (31, 109, 39), (32, 134, 40), (32, 134, 43), (32, 134, 108), (32, 134, 109), (32, 134, 139), (32, 134, 111), (32, 134, 112), (32, 134, 113), (32, 134, 114), (32, 134, 141), (32, 134, 145), (32, 134, 118), (32, 40, 137), (32, 40, 43), (32, 40, 108), (32, 40, 109), (32, 40, 139), (32, 40, 111), (32, 40, 112), (32, 40, 113), (32, 40, 114), (32, 40, 141), (32, 40, 145), (32, 40, 117), (32, 40, 118), (32, 137, 43), (32, 137, 108), (32, 137, 109), (32, 137, 139), (32, 137, 111), (32, 137, 112), (32, 137, 113), (32, 137, 114), (32, 137, 141), (32, 137, 145), (32, 137, 118), (32, 43, 108), (32, 43, 109), (32, 43, 139), (32, 43, 111), (32, 43, 112), (32, 43, 113), (32, 43, 114), (32, 43, 141), (32, 43, 145), (32, 43, 117), (32, 43, 118), (32, 108, 109), (32, 108, 139), (32, 108, 111), (32, 108, 112), (32, 108, 113), (32, 108, 114), (32, 108, 141), (32, 108, 145), (32, 108, 117), (32, 108, 118), (32, 109, 139), (32, 109, 111), (32, 109, 112), (32, 109, 113), (32, 109, 114), (32, 109, 141), (32, 109, 145), (32, 109, 117), (32, 109, 118), (32, 139, 111), (32, 139, 112), (32, 139, 113), (32, 139, 114), (32, 139, 141), (32, 139, 145), (32, 139, 117), (32, 139, 118), (32, 111, 112), (32, 111, 113), (32, 111, 114), (32, 111, 141), (32, 111, 145), (32, 111, 117), (32, 111, 118), (32, 112, 113), (32, 112, 141), (32, 112, 145), (32, 113, 114), (32, 113, 141), (32, 113, 145), (32, 113, 117), (32, 113, 118), (32, 114, 141), (32, 114, 145), (32, 114, 117), (32, 114, 118), (32, 141, 145), (32, 141, 117), (32, 141, 118), (32, 145, 117), (32, 145, 118), (32, 117, 118), (33, 39, 105), (33, 39, 42), (33, 39, 110), (33, 39, 114), (33, 105, 42), (33, 105, 110), (33, 105, 114), (33, 42, 110), (33, 42, 114), (33, 110, 114), (30, 33, 41, 117), (30, 33, 41, 118), (30, 33, 117, 118), (34, 42, 110), (34, 42, 116), (34, 42, 38), (34, 110, 116), (34, 110, 38), (34, 116, 38), (35, 106, 112), (36, 38, 39), (36, 38, 40), (36, 38, 43), (36, 38, 109), (36, 38, 110), (36, 38, 116), (36, 39, 40), (36, 39, 43), (36, 39, 109), (36, 39, 110), (36, 39, 116), (36, 40, 43), (36, 40, 109), (36, 40, 110), (36, 43, 109), (36, 43, 110), (36, 43, 116), (36, 109, 110), (36, 109, 116), (36, 110, 116), (37, 106, 112), (38, 39, 41), (38, 39, 42), (38, 39, 104), (38, 39, 105), (38, 39, 110), (38, 39, 116), (38, 40, 42), (38, 40, 104), (38, 40, 105), (38, 40, 110), (38, 40, 116), (38, 41, 42), (38, 41, 104), (38, 41, 105), (38, 41, 110), (38, 41, 116), (38, 42, 104), (38, 42, 105), (38, 42, 110), (38, 42, 116), (38, 104, 105), (38, 104, 110), (38, 104, 116), (38, 105, 110), (38, 105, 116), (38, 110, 116), (39, 41, 105), (39, 41, 43), (39, 41, 109), (39, 41, 110), (39, 41, 114), (39, 41, 116), (39, 41, 118), (39, 105, 43), (39, 105, 109), (39, 105, 110), (39, 105, 114), (39, 105, 116), (39, 105, 118), (39, 43, 109), (39, 43, 110), (39, 43, 114), (39, 43, 116), (39, 43, 118), (39, 109, 110), (39, 109, 114), (39, 109, 116), (39, 109, 118), (39, 110, 114), (39, 110, 116), (39, 110, 118), (39, 114, 116), (39, 114, 118), (39, 116, 118), (40, 105, 42), (40, 105, 43), (40, 105, 110), (40, 105, 141), (40, 105, 145), (40, 105, 115), (40, 42, 43), (40, 42, 110), (40, 42, 141), (40, 42, 145), (40, 42, 115), (40, 43, 109), (40, 43, 110), (40, 43, 141), (40, 43, 145), (40, 43, 115), (40, 109, 110), (40, 109, 141), (40, 109, 145), (40, 109, 115), (40, 110, 145), (40, 110, 115), (40, 110, 116), (40, 141, 145), (40, 145, 115), (41, 105, 107), (41, 105, 110), (41, 105, 114), (41, 105, 117), (41, 105, 118), (41, 107, 110), (41, 107, 114), (41, 107, 117), (41, 107, 118), (41, 110, 114), (41, 110, 117), (41, 110, 118), (41, 114, 117), (41, 114, 118), (41, 117, 118), (42, 104, 107), (42, 104, 108), (42, 104, 110), (42, 104, 111), (42, 104, 114), (42, 104, 118), (42, 107, 108), (42, 107, 110), (42, 107, 111), (42, 107, 114), (42, 107, 118), (42, 108, 110), (42, 108, 111), (42, 108, 114), (42, 108, 118), (42, 110, 111), (42, 110, 114), (42, 110, 118), (42, 111, 114), (42, 111, 118), (42, 114, 118), (43, 108, 109), (43, 108, 110), (43, 108, 141), (43, 108, 112), (43, 108, 113), (43, 108, 145), (43, 108, 116), (43, 109, 110), (43, 109, 141), (43, 109, 112), (43, 109, 113), (43, 109, 145), (43, 109, 115), (43, 109, 116), (43, 110, 112), (43, 110, 113), (43, 110, 115), (43, 110, 116), (43, 141, 112), (43, 141, 113), (43, 141, 145), (43, 141, 115), (43, 112, 113), (43, 112, 145), (43, 112, 115), (43, 113, 145), (43, 113, 115), (43, 113, 116), (43, 145, 115), (44, 45, 51), (44, 45, 52), (44, 45, 54), (44, 45, 55), (44, 45, 56), (44, 45, 57), (44, 51, 52), (44, 51, 53), (44, 51, 54), (44, 51, 55), (44, 51, 57), (44, 52, 53), (44, 52, 54), (44, 52, 55), (44, 52, 57), (44, 53, 54), (44, 53, 55), (44, 53, 56), (44, 53, 57), (44, 54, 55), (44, 54, 56), (44, 54, 57), (44, 55, 56), (44, 55, 57), (44, 56, 57), (45, 48, 58), (45, 48, 55), (45, 58, 55), (46, 47, 49), (46, 47, 50), (46, 47, 56), (46, 47, 57), (46, 49, 50), (46, 49, 56), (46, 49, 57), (46, 50, 56), (46, 50, 57), (46, 56, 57), (47, 49, 50), (47, 49, 54), (47, 49, 56), (47, 49, 57), (47, 49, 59), (47, 50, 54), (47, 50, 56), (47, 50, 57), (47, 50, 59), (47, 54, 56), (47, 54, 57), (47, 54, 59), (47, 56, 57), (47, 56, 59), (47, 57, 59), (49, 50, 56), (49, 50, 57), (49, 50, 58), (49, 50, 59), (49, 56, 57), (49, 56, 58), (49, 56, 59), (49, 57, 58), (49, 57, 59), (49, 58, 59), (50, 56, 59), (50, 56, 54), (50, 59, 54), (51, 58, 52), (51, 52, 54), (51, 52, 55), (52, 57, 54), (52, 59, 54), (57, 58, 59), (60, 64, 68), (60, 64, 63), (60, 68, 71), (60, 68, 63), (60, 71, 63), (61, 72, 66), (61, 72, 68), (61, 72, 74), (61, 66, 74), (62, 64, 65), (62, 64, 67), (62, 64, 68), (62, 65, 67), (62, 67, 68), (63, 66, 68), (63, 66, 74), (63, 66, 71), (63, 68, 74), (63, 74, 71), (64, 65, 67), (64, 65, 68), (64, 65, 70), (64, 67, 68), (64, 67, 70), (64, 68, 70), (66, 72, 74), (66, 72, 69), (66, 72, 71), (66, 74, 69), (66, 74, 71), (66, 69, 71), (68, 72, 70), (69, 71, 74), (70, 72, 73), (70, 72, 74), (70, 73, 74), (76, 78, 79), (77, 80, 89), (77, 80, 84), (77, 89, 84), (79, 89, 84), (79, 89, 87), (79, 84, 87), (80, 84, 89), (81, 82, 85), (82, 84, 85), (84, 89, 85), (84, 89, 87), (84, 85, 87), (85, 87, 89), (90, 96, 100), (90, 96, 101), (90, 96, 102), (90, 96, 91), (90, 96, 93), (90, 96, 94), (90, 96, 95), (90, 100, 101), (90, 100, 102), (90, 100, 91), (90, 100, 92), (90, 100, 93), (90, 100, 94), (90, 100, 95), (90, 101, 102), (90, 101, 91), (90, 101, 92), (90, 101, 93), (90, 101, 94), (90, 101, 95), (90, 102, 91), (90, 102, 92), (90, 102, 93), (90, 102, 95), (90, 91, 92), (90, 91, 93), (90, 91, 94), (90, 91, 95), (90, 92, 93), (90, 92, 94), (90, 92, 95), (90, 93, 94), (90, 93, 95), (90, 94, 95), (91, 96, 99), (92, 93, 98), (92, 93, 94, 95), (93, 98, 94), (93, 98, 95), (93, 94, 95), (94, 96, 98), (94, 96, 100), (94, 96, 102), (94, 98, 100), (94, 98, 102), (94, 100, 102), (95, 96, 98), (95, 96, 99), (95, 96, 100), (95, 98, 99), (95, 98, 100), (95, 99, 100), (96, 99, 101), (96, 99, 102), (96, 101, 102), (99, 101, 102), (104, 105, 107), (104, 105, 108), (104, 105, 111), (104, 105, 112), (104, 105, 113), (104, 105, 114), (104, 105, 117), (104, 107, 108), (104, 107, 111), (104, 107, 112), (104, 107, 113), (104, 107, 114), (104, 107, 115), (104, 107, 117), (104, 108, 111), (104, 108, 112), (104, 108, 113), (104, 108, 114), (104, 108, 115), (104, 108, 117), (104, 111, 112), (104, 111, 113), (104, 111, 114), (104, 111, 115), (104, 111, 117), (104, 112, 114), (104, 112, 115), (104, 112, 117), (104, 113, 114), (104, 113, 115), (104, 113, 117), (104, 114, 115), (104, 114, 117), (104, 115, 117), (105, 114, 118), (105, 114, 116), (105, 114, 110), (105, 118, 116), (105, 118, 110), (105, 116, 110), (106, 109, 112), (106, 112, 141, 145), (107, 138, 118), (107, 138, 143), (107, 118, 143), (108, 141, 111), (108, 141, 113), (108, 141, 114), (108, 141, 115), (108, 141, 145), (108, 141, 117), (108, 141, 118), (108, 111, 113), (108, 111, 114), (108, 111, 115), (108, 111, 145), (108, 111, 117), (108, 111, 118), (108, 113, 114), (108, 113, 115), (108, 113, 145), (108, 113, 117), (108, 113, 118), (108, 114, 145), (108, 114, 117), (108, 114, 118), (108, 115, 145), (108, 115, 117), (108, 115, 118), (108, 145, 117), (108, 145, 118), (108, 117, 118), (109, 110, 116), (110, 114, 116), (111, 114, 141), (111, 114, 118), (111, 141, 118), (112, 113, 145), (112, 113, 141), (112, 145, 141), (113, 145, 115), (113, 145, 139), (113, 145, 141), (113, 115, 139), (113, 115, 141), (113, 139, 141), (115, 141, 145), (117, 133, 135), (117, 133, 136), (117, 133, 138), (117, 133, 143), (117, 133, 144), (117, 133, 118), (117, 135, 136), (117, 135, 138), (117, 135, 143), (117, 135, 144), (117, 135, 118), (117, 136, 138), (117, 136, 143), (117, 136, 144), (117, 136, 118), (117, 138, 143), (117, 138, 144), (117, 138, 118), (117, 143, 144), (117, 143, 118), (117, 144, 118), (119, 124, 125), (120, 128, 122), (120, 129, 126), (120, 130, 122), (120, 122, 124), (121, 183, 125), (121, 183, 127), (121, 125, 127), (122, 128, 129), (122, 128, 130), (122, 129, 130), (123, 128, 129), (123, 128, 126), (123, 129, 126), (125, 128, 127), (125, 183, 127), (126, 128, 129), (126, 128, 127), (126, 129, 127), (127, 128, 131), (128, 129, 130), (132, 144, 142), (132, 144, 135), (132, 142, 135), (133, 134, 135), (133, 134, 136), (133, 134, 137), (133, 134, 138), (133, 134, 144), (133, 135, 136), (133, 135, 137), (133, 135, 138), (133, 135, 140), (133, 135, 142), (133, 135, 143), (133, 135, 144), (133, 136, 137), (133, 136, 138), (133, 136, 140), (133, 136, 142), (133, 136, 144), (133, 137, 138), (133, 137, 140), (133, 137, 143), (133, 137, 144), (133, 138, 140), (133, 138, 143), (133, 138, 144), (133, 140, 144), (133, 142, 144), (133, 143, 144), (135, 136, 138), (135, 136, 144), (135, 136, 142), (135, 138, 144), (135, 144, 142), (136, 144, 138), (136, 144, 139), (136, 138, 139), (137, 145, 139), (137, 145, 140), (137, 145, 141), (137, 139, 140), (137, 139, 141), (139, 141, 145), (146, 147, 150), (146, 147, 152), (146, 147, 153), (146, 147, 156), (146, 147, 159), (146, 149, 153), (146, 149, 159), (146, 150, 152), (146, 150, 153), (146, 150, 154), (146, 150, 156), (146, 150, 159), (146, 152, 153), (146, 152, 154), (146, 152, 156), (146, 152, 159), (146, 153, 154), (146, 153, 156), (146, 153, 159), (146, 154, 156), (146, 154, 159), (146, 156, 159), (147, 160, 148), (147, 160, 151), (147, 160, 152), (147, 160, 155), (147, 160, 156), (147, 160, 157), (147, 160, 159), (147, 148, 151), (147, 148, 152), (147, 148, 155), (147, 148, 156), (147, 148, 157), (147, 148, 159), (147, 151, 152), (147, 151, 155), (147, 151, 157), (147, 152, 157), (147, 152, 159), (147, 155, 156), (147, 155, 157), (147, 155, 159), (147, 156, 157), (147, 156, 159), (147, 157, 159), (148, 154, 156), (148, 154, 157), (148, 154, 159), (148, 156, 157), (148, 156, 159), (148, 157, 159), (149, 152, 159), (149, 155, 160), (149, 155, 159), (150, 152, 153), (150, 152, 154), (150, 152, 156), (150, 153, 154), (150, 153, 156), (150, 154, 156), (152, 160, 153), (152, 160, 159), (152, 153, 154), (152, 153, 159), (152, 154, 159), (153, 156, 159), (154, 156, 159), (156, 158, 159), (161, 168, 162), (161, 168, 173), (161, 168, 167), (161, 162, 173), (161, 162, 167), (161, 173, 167), (162, 168, 170), (162, 168, 164), (162, 168, 173), (162, 170, 164), (162, 170, 173), (162, 164, 173), (163, 165, 169), (163, 169, 173), (165, 169, 173), (167, 168, 172), (168, 170, 173), (174, 178, 181), (174, 178, 182), (174, 178, 185), (174, 178, 188), (174, 181, 182), (174, 181, 185), (174, 181, 187), (174, 181, 188), (174, 182, 185), (174, 182, 187), (174, 182, 188), (174, 185, 187), (174, 185, 188), (174, 187, 188), (176, 185, 188), (177, 184, 178), (177, 184, 181), (177, 184, 182), (177, 178, 181), (177, 178, 182), (177, 181, 182), (178, 179, 180), (178, 179, 181), (178, 179, 182), (178, 179, 184), (178, 179, 186), (178, 179, 188), (178, 180, 181), (178, 180, 182), (178, 180, 184), (178, 180, 186), (178, 180, 188), (178, 181, 182), (178, 181, 184), (178, 181, 186), (178, 181, 188), (178, 182, 184), (178, 182, 186), (178, 182, 188), (178, 184, 186), (178, 184, 188), (178, 186, 188), (181, 184, 187), (181, 184, 188), (181, 184, 182), (181, 187, 188), (181, 187, 182), (181, 188, 182), (182, 184, 186), (185, 187, 188), (190, 200, 193), (190, 200, 197), (190, 200, 191), (190, 193, 197), (190, 193, 191), (190, 197, 191), (191, 193, 197), (192, 200, 196), (192, 200, 199), (192, 196, 199), (193, 197, 200), (194, 196, 199), (195, 196, 198), (202, 206, 212), (202, 206, 213), (202, 206, 214), (202, 206, 215), (202, 206, 216), (202, 212, 213), (202, 212, 214), (202, 212, 215), (202, 212, 216), (202, 213, 214), (202, 213, 215), (202, 213, 216), (202, 214, 215), (202, 214, 216), (202, 215, 216), (206, 208, 211), (206, 208, 212), (206, 208, 214), (206, 208, 215), (206, 208, 216), (206, 211, 212), (206, 211, 214), (206, 211, 215), (206, 211, 216), (206, 212, 213), (206, 212, 214), (206, 212, 215), (206, 212, 216), (206, 213, 214), (206, 213, 216), (206, 214, 215), (206, 214, 216), (206, 215, 216), (207, 212, 213), (207, 212, 214), (207, 213, 214), (208, 209, 210), (208, 209, 211), (208, 209, 215), (208, 210, 211), (208, 210, 215), (208, 211, 215), (209, 216, 217), (209, 216, 210), (209, 216, 215), (209, 217, 210), (209, 217, 215), (209, 210, 215), (210, 217, 214), (210, 217, 215), (210, 214, 215), (211, 215, 216), (213, 214, 216), (215, 216, 217)]
-    # create benefit - from above
-    benefit = {}
-    for i in lst: 
-        total = 0
-        for trip in i:
-            total += b[trip]
-        benefit[i] = total
+  major_length = 4
+  data_reduced = reduce(data, major_length)
+  data_reduced.reset_index(drop=True, inplace=True)
+  print(data_reduced)
 
-    model = gp.Model("ZoneSelection")
-    # create decision variables - we make one to indicate if the clique is chosen or not 
-    y = {}
-    # stores whether or not it is a 1 or 0 basically (selected or not)
-    for clique in lst: 
-        y[clique] = model.addVar(vtype = GRB.BINARY, obj = benefit[clique], name=f"y_{clique}")
-    # objective function
-    model.setObjective(gp.quicksum(benefit[clique] * y[clique] for clique in lst), GRB.MAXIMIZE)
-    # constraints 
+  # can change the connectivity constraint and your max diameter
+  lst, cardinality = generate_shared_trips_more(len(data_reduced), 1.5, data_reduced, distances, info, 0.6)
+  print(lst)
+  print(len(lst))
+  print("Highest Cardinality", cardinality)
 
-    # ensuring that the cliques selected do not overlap 
-    nodes = set()
-    for clique in lst: 
-        for n in clique: 
-            nodes.add(n)
-    # create the constraint that one node can only be selected at one time (non-overlapping)
-    for n in nodes: 
+  # need to fix there is a better way to do this 
+  d = {2: [], 3: [], 4: [], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 13:[], 14: [], 15:[], 16:[], 17:[]}
+  sum = 0
+  for i in lst:
+    d[len(i)].append(i)
+    sum += 1
+  for i in d.keys():
+    print("Cardinality-" + str(i) + ": " + str(len(d[i])))
+  saved_lst = lst
+  print(sum)
+
+  # optimization based on the lst
+  benefit = {}
+  for i in lst:
+    total = 0
+    for trip in i:
+      total += data_reduced.loc[trip, 'demand']
+    benefit[i] = total
+
+  print(benefit)
+
+  # i do not know if these params will work but will debug later
+  params = {
+  "WLSACCESSID": '3d967c9e-4aa5-4f43-a846-07dfc27bf8ed',
+  "WLSSECRET": 'd352f07c-2cc8-4cd9-9e9a-a2099278483f',
+  "LICENSEID": 2654733,
+  }
+  env = gp.Env(params=params)
+  model = gp.Model(env=env)
+  # create decision variables - we make one to indicate if the clique is chosen or not
+  y = {}
+  # stores whether or not it is a 1 or 0 basically (selected or not)
+  for clique in lst:
+    y[clique] = model.addVar(vtype = GRB.BINARY, obj = benefit[clique], name=f"y_{clique}")
+  # objective function
+  model.setObjective(gp.quicksum(benefit[clique] * y[clique] for clique in lst), GRB.MAXIMIZE)
+  # constraints
+
+  # ensuring that the cliques selected do not overlap
+  nodes = set()
+  for clique in lst:
+    for n in clique:
+      nodes.add(n)
+  # create the constraint that one node can only be selected at one time (non-overlapping)
+  for n in nodes:
     # we only need to add the constraint if it is acc in the clique
-        model.addConstr(
-            gp.quicksum(y[clique] for clique in lst if n in clique) <= 1
-        )
-
-    # adding the constraint that we need to select less than m 
-    # let's set m to 10
     model.addConstr(
-        gp.quicksum(y[clique] for clique in lst) <= 10
+        gp.quicksum(y[clique] for clique in lst if n in clique) <= 1
     )
 
-    model.optimize()
+  # adding the constraint that we need to select less than m
+  # let's set m to 10
+  model.addConstr(
+      gp.quicksum(y[clique] for clique in lst) <= 10
+  )
 
-    if model.status == GRB.OPTIMAL: 
-        selected_zones = [clique for clique in lst if y[clique].X > 0.5]
+  model.optimize()
+
+  if model.status == GRB.OPTIMAL:
+    selected_zones = [clique for clique in lst if y[clique].X > 0.5]
     print("Selected candidate zones:", selected_zones)
     print("Optimal total benefit:", model.objVal)
+  
+  #post_processing of zones with nodes instead
+  l = []
+  for zones in selected_zones:
+    z = set()
+    for trip in zones:
+      z.add(data_reduced.loc[trip, 'trip1'])
+      z.add(data_reduced.loc[trip, 'trip2'])
+    l.append(list(z))
+
+  visualize_optimal_zones(G, l)
 
 if __name__ == "__main__":
     main()
