@@ -183,7 +183,7 @@ def visualize_demand_pattern(H, demand, filename="demand_pattern.png"):
     cbar.set_label('Demand Level')
     ax.set_title("Demand Heatmap")
 
-    plt.savefig(filename)
+    plt.savefig(f"output/{filename}")
     plt.close()
 
 def generate_dataframe(H, demand, cost_dist, max_diameter):
@@ -534,5 +534,5 @@ def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
     ax.legend()
 
     # Save the plot instead of showing it
-    plt.savefig(filename)
+    plt.savefig(f"output/{filename}")
     plt.close()

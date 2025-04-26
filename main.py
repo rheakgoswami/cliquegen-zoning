@@ -3,19 +3,21 @@ from utils import visualize_demand_pattern, visualize_optimal_zones
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
-from gurobipy import Model, GRB, quicksum
+import os
 
 
 def main(): 
 
   #! [Hins] Parameters
   NUM_ZONES = 4
-  MAX_DIAMETER = 1.5
+  MAX_DIAMETER = 1
   CONNECTIVITY = 1
-    
-  # Random seed
   seed = 42
   np.random.seed(seed)
+  
+  #![Hins] Create an output folder
+  if not os.path.exists("output"):
+    os.makedirs("output")
 
   # Generate the graph
   G = generate_delaunary_graph(50, 10, one_way_prob=0, edge_ratio=0.8)
