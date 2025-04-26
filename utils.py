@@ -199,8 +199,8 @@ def generate_dataframe(H, demand, cost_dist, max_diameter):
     # info = {}
 
     #![Hins] This is problematic. We should consider any pairs of nodes, not only those connected with an edge. The graph is artificial to mimic the road netowrk.
-    for o, d in edges:
-    # for o, d in permutations(nodes, 2):
+    # for o, d in edges:
+    for o, d in permutations(nodes, 2):
         if cost_dist[o][d] > max_diameter:
             continue
         entry = {'origin_node': o, 'dest_node': d, 'origin': (pos[o][0], pos[o][1]), 'dest': (pos[d][0], pos[d][1]), 'dist': cost_dist[o][d],
@@ -343,7 +343,7 @@ def can_serve_quasi_req(requests, pairwise_map, connectivity_threshold):
     # The required number of valid edges is the connectivity threshold times the total possible pairs.
     # required_edges = math.ceil(connectivity_threshold * total_pairs)
 
-    return False
+    # return False
 
 
 #![Hins] Rewriting the clique generation function
@@ -370,16 +370,18 @@ def clique_generator(data, distances, max_diameter, connectivity_threshold):
     while True:
         
         # Termination condition
-        if card > max_card:
+        if card > max_card + 1:
             break
 
         prev_list = shared_map[card - 1]
         for clique in prev_list:
             for trip in set(range(no_of_trips)) - clique:
+                
                 # Check if the new clique is visited already
                 clique_key = tuple(sorted(clique | {trip}))
                 if visited_cliques[clique_key] == 1:
                     continue
+                
                 # Check if the new clique is valid
                 if can_serve_quasi_req(clique | {trip}, pairwise_map, connectivity_threshold):
                     

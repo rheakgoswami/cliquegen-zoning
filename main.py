@@ -1,5 +1,5 @@
-from shareability_unoptimized import generate_delaunary_graph, compute_shortest_path_distances, generate_od_demand_mixed, generate_dataframe, clique_generator
-from shareability_unoptimized import visualize_demand_pattern, visualize_optimal_zones
+from utils import generate_delaunary_graph, compute_shortest_path_distances, generate_od_demand_mixed, generate_dataframe, clique_generator
+from utils import visualize_demand_pattern, visualize_optimal_zones
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
@@ -18,7 +18,7 @@ def main():
   np.random.seed(seed)
 
   # Generate the graph
-  G = generate_delaunary_graph(50, 10, one_way_prob=0.2, edge_ratio=0.8)
+  G = generate_delaunary_graph(50, 10, one_way_prob=0, edge_ratio=0.8)
 
   # Compute shortest path distances
   # [Hins] Use the original distance but not the square one
@@ -45,30 +45,30 @@ def main():
   # can change the connectivity constraint and your max diameter
   #![Hins] Use data not data_reduced (it was reduced inside while being created)
   lst, cardinality = clique_generator(data, distances, MAX_DIAMETER, CONNECTIVITY)
-  print(lst)
+  
   print(len(lst))
   print("Highest Cardinality", cardinality)
 
   # need to fix there is a better way to do this 
-  d = {2: [], 3: [], 4: [], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 13:[], 14: [], 15:[], 16:[], 17:[]}
-  sum = 0
-  for i in lst:
-    d[len(i)].append(i)
-    sum += 1
-  for i in d.keys():
-    print("Cardinality-" + str(i) + ": " + str(len(d[i])))
-  saved_lst = lst
-  print(sum)
+  # d = {2: [], 3: [], 4: [], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 13:[], 14: [], 15:[], 16:[], 17:[]}
+  # sum = 0
+  # for i in lst:
+  #   d[len(i)].append(i)
+  #   sum += 1
+  # for i in d.keys():
+  #   print("Cardinality-" + str(i) + ": " + str(len(d[i])))
+  # saved_lst = lst
+  # print(sum)
 
   # optimization based on the lst
   benefit = {}
-  for i in lst:
+  for clique in lst:
     total = 0
-    for trip in i:
+    for trip in clique:
       total += data.loc[trip, 'demand']
-    benefit[i] = total
+    benefit[clique] = total
 
-  print(benefit)
+  # print(benefit)
 
   # i do not know if these params will work but will debug later
   params = {
@@ -116,8 +116,8 @@ def main():
   for zones in selected_zones:
     z = set()
     for trip in zones:
-      z.add(data.loc[trip, 'trip1'])
-      z.add(data.loc[trip, 'trip2'])
+      z.add(data.loc[trip, 'origin_node'])
+      z.add(data.loc[trip, 'dest_node'])
     l.append(list(z))
 
   visualize_optimal_zones(G, l)
