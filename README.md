@@ -17,6 +17,8 @@ This virtual environment should come with all the dependencies already downloade
     pip install -r requirements.txt
 
 ### Run the Code
+__[Hins] Something below is inconsistent with your code. Make modification.__
+
 In shareability.py, you will see that there is a main() function. This function is what you will primarily alter to see different results. The current default that actually runs the clique generation is the following command. 
         lst = generate_shared_trips_more(len(data_reduced), 4, 5, data_reduced)
 Here, we have a maximum cardinality of 4 for the cliques and the maximum diameter for each clique is 5 km. The other line that you can change in main() is the csv file that is being read. 

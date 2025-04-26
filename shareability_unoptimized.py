@@ -18,6 +18,7 @@ from rtree import index  # For efficient spatial adjacency search
 import geopandas as gpd
 from shapely.geometry import Point
 import math
+from copy import deepcopy
 
 def generate_delaunary_graph(num_nodes, width, one_way_prob = 0.2, edge_ratio = 0.8):
 
@@ -185,97 +186,115 @@ def visualize_demand_pattern(H, demand, filename="demand_pattern.png"):
     plt.savefig(filename)
     plt.close()
 
-def generate_dataframe(H, demand, cost_dist):
-    """
-    Visualize the demand pattern on a graph.
+def generate_dataframe(H, demand, cost_dist, max_diameter):
 
-    Parameters:
-    - H: NetworkX graph with 'pos' node attributes
-    - demand: Dictionary containing demand between nodes
-    - filename: Output filename for the plot
-    """
     pos = nx.get_node_attributes(H, 'pos')
-    edges = list(H.edges())
+    # edges = list(H.edges())
+    nodes = list(H.nodes())
     data = []
-    max_dist = 0
-    info = {}
+    #![Hins] we don't need this
+    # max_dist = 0
+    
+    #![Hins] Remove everything related to info. This is redundant
+    # info = {}
 
-    for o, d in edges:
-      entry = {'trip1': o, 'trip2': d, 'origin': (pos[o][0], pos[o][1]), 'dest': (pos[d][0], pos[d][1]), 'dist': cost_dist[o][d],
-              'demand': demand[o][d]}
-      info[(pos[o][0], pos[o][1])] = o
-      info[(pos[d][0], pos[d][1])] = d
-      if cost_dist[o][d] > max_dist:
-        max_dist = cost_dist[o][d]
-      data.append(entry)
+    #![Hins] This is problematic. We should consider any pairs of nodes, not only those connected with an edge. The graph is artificial to mimic the road netowrk.
+    # for o, d in edges:
+    for o, d in permutations(nodes, 2):
+        if cost_dist[o][d] > max_diameter:
+            continue
+        entry = {'origin_node': o, 'dest_node': d, 'origin': (pos[o][0], pos[o][1]), 'dest': (pos[d][0], pos[d][1]), 'dist': cost_dist[o][d],
+                'demand': demand[o][d]}
+        # info[(pos[o][0], pos[o][1])] = o
+        # info[(pos[d][0], pos[d][1])] = d
+        # if cost_dist[o][d] > max_dist:
+        #   max_dist = cost_dist[o][d]
+        data.append(entry)
 
     df = pd.DataFrame(data)
-    return df, max_dist, info
+    return df
 
 # precompute the dictionary of the origins and destinations
-def pre_computations(no_of_trips, data_reduced):
-  origins = dict()
-  dest = dict()
-  benefit = dict()
-  for trip in range(no_of_trips):
-    o = (data_reduced.loc[trip, 'origin'])
-    d = (data_reduced.loc[trip, 'dest'])
-    origins[trip] = Point(o)
-    dest[trip] = Point(d)
-  return origins, dest
+def pre_computations(no_of_trips, data):
+    origins = dict()
+    dest = dict()
+    # benefit = dict()
+    for trip in range(no_of_trips):
+        o = (data.loc[trip, 'origin'])
+        d = (data.loc[trip, 'dest'])
+        origins[trip] = Point(o)
+        dest[trip] = Point(d)
+    return origins, dest
 
 # convex hull helper function
-def convex_hull_extend(clique, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold):
-  # origins and dest are calculated before hand
-  extension = False
-  points = []
-  # BUG - points is never acucumulated with the clique trips
-  for trip in clique:
-    points.append(origins[trip])
-    points.append(dest[trip])
+def convex_hull_extend(clique, origins, dest, data, visited_cliques):
+  
+    is_extended = False
+  
+    # Number of trips (i.e., requests)
+    no_of_trips = len(data)
 
-  # base case
-  if len(points) == 0:
-    return clique # this is because we do not have any points so clique must be len 0
+    # origins and dest are calculated before hand
+    #![Hins] Do you do this for speed-up? Is Point() slow?
+    points = []
+    for trip in clique:
+        points.append(origins[trip])
+        points.append(dest[trip])
 
-  # create the convex hull
-  convex_hull = MultiPoint(points).convex_hull
-  # create the set that will have all the points that have to be grouped together
-  extend_set = set(clique)
-  # checks for all the possible trips that could be encapsulated
-  for trip in range(no_of_trips):
-    if trip not in clique:
-      # this means that the trip is encapsualted by the hull
-      if convex_hull.contains(origins[trip]) and convex_hull.contains(dest[trip]):
-        extend_set.add(trip)
-  # we should only return the extend_set if that is also "serveable"
-  extended = tuple(sorted(extend_set))
-  if clique == extended:
-    return clique
-  if can_serve_quasi_req(extended, max_diameter, data_reduced, info, distances, connectivity_threshold):
-    return extended
-  return clique
+    #![Hins] I don't understand why you need this base case?
+    # base case
+    # if len(points) == 0:
+    #   return clique # this is because we do not have any points so clique must be len 0
 
+    # create the convex hull
+    convex_hull = MultiPoint(points).convex_hull
+    # create the set that will have all the points that have to be grouped together
+    extend_set = deepcopy(clique)
+    # checks for all the possible trips that could be encapsulated
+    for trip in set(range(no_of_trips)) - clique:
+        #![Hins] Check if the clique is already visited
+        clique_key = tuple(sorted(clique | {trip}))
+        if visited_cliques[clique_key] == 1:
+            continue
+        # this means that the trip is encapsualted by the hull
+        if convex_hull.contains(origins[trip]) and convex_hull.contains(dest[trip]):
+            extend_set.add(trip)
+    if extend_set != clique:
+        is_extended = True
+    return is_extended, extend_set
+
+  #![Hins] Everything below is redundant
+  # # we should only return the extend_set if that is also "serveable"
+  # extended = tuple(sorted(extend_set))
+  # if clique == extended:
+  #   return clique
+  # if can_serve_quasi_req(extended, max_diameter, data, distances, connectivity_threshold):
+  #   return extended
+  # return clique
+
+#![Hins] We don't need this
 # pre-processing step to remove the "major" lines
-def reduce(df, major_length):
-  return df[df['dist'] <= major_length]
+# def reduce(df, major_length):
+#   return df[df['dist'] <= major_length]
 
 # Determines if a set of trips can be feasibly shared by checking the total travel distance.
 # can be optimized further
-def can_serve_req(requests, max_diameter, data_reduced, info, cost_dist):
+#![Hins] Probably we only need the simplified version of this function: we only need to check two requests at a time 
+def can_serve_req(requests, max_diameter, data, cost_dist):
     if len(requests) < 2:
-        return False
+        raise ValueError("At least two requests are required.")
 
-    trip_data = [data_reduced.loc[req] for req in requests]
+    trip_data = [data.loc[req] for req in requests]
 
     # can serve requests needs to be done in a way that we find the maximum distance between any two points in the trip
     # Extract origin and destination points
-    locations = [trip['origin'] for trip in trip_data] + \
-                [trip['dest'] for trip in trip_data]
+    nodes = [trip['origin_node'] for trip in trip_data] + \
+                            [trip['dest_node'] for trip in trip_data]
     # we need to try two combinations of all pairs of locations and return the max
     maximum = 0
-    for combo in itertools.combinations(locations, 2):
-        dist = cost_dist[info[combo[0]]][info[combo[1]]]
+    for n1, n2 in itertools.combinations(nodes, 2):
+        #![Hins] Need to check both directions in case the cost matrix is not symmetric (e.g., in the road network)
+        dist = max(cost_dist[n1][n2], cost_dist[n2][n1])
         # return the first instance that satisfies both constraints
         # counts it out in the first go so probably there are a lot more
         # it needs to be actually worth it to share the trips
@@ -283,96 +302,180 @@ def can_serve_req(requests, max_diameter, data_reduced, info, cost_dist):
             maximum = dist
     return maximum <= max_diameter
 
-def can_serve_quasi_req(requests, max_diameter, data_reduced, info, cost_dist, connectivity_threshold):
+def can_serve_quasi_req(requests, pairwise_map, connectivity_threshold):
+    
     n = len(requests)
-    if n < 3:
-        return False
-
+    
+    if n == 1:
+        raise ValueError("At least two requests are required.")
+    if n == 2:
+        # return can_serve_req(requests, max_diameter, data, cost_dist)
+        return pairwise_map[tuple(sorted(requests))]
+    
+    #![Hins] We know the # of total pairs and can stop early
     valid_edges = 0
-    total_pairs = 0
+    invalid_edges = 0
+    total_pairs = len(requests) * (len(requests) - 1) // 2
 
     # Evaluate every unique pair in the candidate.
-    for node1, node2 in itertools.combinations(requests, 2):
-        total_pairs += 1
-        if can_serve_req((node1, node2), max_diameter, data_reduced, info, cost_dist):
+    for pair in itertools.combinations(requests, 2):
+        # if can_serve_req((r1, r2), max_diameter, data, cost_dist):
+        if pairwise_map[tuple(sorted(pair))]:
             valid_edges += 1
-
+        else:
+            invalid_edges += 1			
+        
+      #![Hins] Early termination
+        if valid_edges >= math.ceil(total_pairs * connectivity_threshold):
+            return True
+        if invalid_edges > total_pairs - math.ceil(total_pairs * connectivity_threshold):
+            return False
     # The required number of valid edges is the connectivity threshold times the total possible pairs.
-    required_edges = math.ceil(connectivity_threshold * total_pairs)
+    # required_edges = math.ceil(connectivity_threshold * total_pairs)
 
-    return valid_edges >= required_edges
+    return False
 
-# the implementation seems to be okay - feasibility is not determined correctly
-# we want to modify generate_shared_trips to basically find the highest cardinality of cliques it can form within a diameter and not be limited by an arg
-# a brute force way to do it is like we keep on increasing cardinality until we have a shared_map[cardinality] has length 0
-def generate_shared_trips_more(no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold):
-    # pre-computations and set up
-    not_empty = False # this is to basically do the brute force way because you can't create the next step if there is nothing to share
-    origins, dest = pre_computations(no_of_trips, data_reduced)
-    shared_map = {}
-    final_results = []
-    cardinality = 2
 
-    # we know that at a minimum that we will always have at least 2 trips
-    shared_map[2] = []
-    # combinations already makes it so that order does not matter
-    # forming the base foundation of the cliques of size 2
-    for clique in itertools.combinations(range(no_of_trips), 2):
-      # we can stick to can_serve request in this case bc we are assuming that the connectivity constraint will always be greater than 50%
-      if can_serve_req(clique, max_diameter, data_reduced, info, distances):
-        # if we can serve these two trips
-        # what can be added with convex hull
-        extended_clique = sorted(convex_hull_extend(clique, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold))
-        shared_map[2].append(tuple(extended_clique))
-    if len(shared_map[2]) > 0:
-      not_empty = True
-      final_results.extend(shared_map[2])
-    print("cardinality 2 complete")
+#![Hins] Rewriting the clique generation function
+def clique_generator(data, distances, max_diameter, connectivity_threshold):  
+    
+    # Initialization
+    no_of_trips = len(data)
+    shared_map = defaultdict(list)
+    shared_map[1] = [{trip} for trip in range(no_of_trips)]
+    visited_cliques = defaultdict(int)
+    card = 2
+    # The maximum cardinality seen so far (updated dynamically)
+    max_card = 2
+    
+    # Pre-computation for efficiency
+    origins, dest = pre_computations(no_of_trips, data)
+    pairwise_map = defaultdict(int)
+    for pair in itertools.combinations(range(no_of_trips), 2):
+        pair = tuple(sorted(pair))
+        pairwise_map[pair] = can_serve_req(pair, max_diameter, data, distances)  
 
-    # build candidates for cardinality > 2
-    while not_empty:
-      cardinality += 1
-      shared_map[cardinality] = []
+    # Start with cardinality 2
+    while True:
+        
+        # Termination condition
+        if card > max_card:
+            break
 
-      # prepare prev candidates for efficient look up
-      prev_list = shared_map[cardinality-1]
+        prev_list = shared_map[card - 1]
+        for clique in prev_list:
+            for trip in set(range(no_of_trips)) - clique:
+                # Check if the new clique is visited already
+                clique_key = tuple(sorted(clique | {trip}))
+                if visited_cliques[clique_key] == 1:
+                    continue
+                # Check if the new clique is valid
+                if can_serve_quasi_req(clique | {trip}, pairwise_map, connectivity_threshold):
+                    
+                    # Further checking the convex hull extension
+                    is_extended, extended_clique = convex_hull_extend(clique | {trip}, origins, dest, data, visited_cliques)
+                    if is_extended:
+                        new_card = len(extended_clique)
+                        shared_map[new_card].append(extended_clique)
+                        clique_key = tuple(sorted(extended_clique))
+                        visited_cliques[clique_key] = 1
+                        max_card = max(max_card, new_card)
+                    else:
+                        shared_map[card].append(clique | {trip})
+                        clique_key = tuple(sorted(clique | {trip}))
+                        visited_cliques[clique_key] = 1
+                        max_card = max(max_card, card)
+                else:
+                    # We also mark the invalid cliques as visited to avoid rechecking
+                    clique_key = tuple(sorted(clique | {trip}))
+                    visited_cliques[clique_key] = 1
+        
+        print(f"Cardinality {card} has {len(shared_map[card])} cliques")
+        print(f"Cardinality {card} complete")
+        
+        # Increase the cardinality
+        card += 1
+      
+    # Extract the final list of cliques
+    clique_list = []
+    for cliques in shared_map.values():
+        clique_list.extend(cliques)
 
-      # generating a dictionary of common prefixes to group the elements
-      groups = dict()
-      for p in prev_list:
-         # exclude the last element and put the prefix in
-         groups.setdefault(tuple(p[:-1]), set()).add(p[-1])  # to make sure that everything is unique
-      # form the new candidates
-      for prefix, last in groups.items():
-        base_length = len(prefix)
-        if len(last) == 2:
-          candidate = prefix + tuple(sorted(last))
-          if can_serve_quasi_req(candidate, max_diameter, data_reduced, info, distances, connectivity_threshold):
-            extended_clique = convex_hull_extend(candidate, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold)
-            shared_map[cardinality].append(tuple(extended_clique))
-        if len(last) > 2:
-          # forming the new pairs
-          for pair in itertools.combinations(last, 2):
-            candidate = prefix + tuple(sorted(pair))
-            if can_serve_quasi_req(candidate, max_diameter, data_reduced, info, distances, connectivity_threshold):
-              extended_clique = convex_hull_extend(candidate, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info, connectivity_threshold)
-              shared_map[cardinality].append(tuple(extended_clique))
+    return clique_list, max_card
+  
 
-      # # now that we have a whole new candidate that we can use we can then check if they are valid
-      # for clique in new_candidate:
-      #   # quasi clique generation takes place here
-      #   if can_serve_req(clique, max_diameter, data_reduced, info, distances):
-      #     # we do the same extension that we did above
-      #     extended_clique = convex_hull_extend(clique, origins, dest, no_of_trips, max_diameter, data_reduced, distances, info)
-      #     shared_map[cardinality].append(extended_clique)
-      if len(shared_map[cardinality]) > 0:
-        not_empty = True
-        final_results.extend(shared_map[cardinality])
-        print("definitely moving onto cardinality", cardinality + 1)
-      else:
-        not_empty = False # this means that we no longer can extend
-      print(cardinality, "cardinality done")
-    return final_results, cardinality-1
+
+# # the implementation seems to be okay - feasibility is not determined correctly
+# # we want to modify generate_shared_trips to basically find the highest cardinality of cliques it can form within a diameter and not be limited by an arg
+# # a brute force way to do it is like we keep on increasing cardinality until we have a shared_map[cardinality] has length 0
+# def generate_shared_trips_more(no_of_trips, max_diameter, data, distances, connectivity_threshold):
+#     # pre-computations and set up
+#     not_empty = False # this is to basically do the brute force way because you can't create the next step if there is nothing to share
+#     origins, dest = pre_computations(no_of_trips, data)
+#     shared_map = {}
+#     final_results = []
+#     cardinality = 2
+
+#     # we know that at a minimum that we will always have at least 2 trips
+#     shared_map[2] = []
+#     # combinations already makes it so that order does not matter
+#     # forming the base foundation of the cliques of size 2
+#     for clique in itertools.combinations(range(no_of_trips), 2):
+#       # we can stick to can_serve request in this case bc we are assuming that the connectivity constraint will always be greater than 50%
+#       if can_serve_req(clique, max_diameter, data, distances):
+#         # if we can serve these two trips
+#         # what can be added with convex hull
+#         extended_clique = sorted(convex_hull_extend(clique, origins, dest, data))
+#         shared_map[2].append(tuple(extended_clique))
+#     if len(shared_map[2]) > 0:
+#       not_empty = True
+#       final_results.extend(shared_map[2])
+#     print("cardinality 2 complete")
+
+#     # build candidates for cardinality > 2
+#     while not_empty:
+#       cardinality += 1
+#       shared_map[cardinality] = []
+
+#       # prepare prev candidates for efficient look up
+#       prev_list = shared_map[cardinality-1]
+
+#       # generating a dictionary of common prefixes to group the elements
+#       groups = dict()
+#       for p in prev_list:
+#          # exclude the last element and put the prefix in
+#          groups.setdefault(tuple(p[:-1]), set()).add(p[-1])  # to make sure that everything is unique
+#       # form the new candidates
+#       for prefix, last in groups.items():
+#         base_length = len(prefix)
+#         if len(last) == 2:
+#           candidate = prefix + tuple(sorted(last))
+#           if can_serve_quasi_req(candidate, max_diameter, data, distances, connectivity_threshold):
+#             extended_clique = convex_hull_extend(candidate, origins, dest, data)
+#             shared_map[cardinality].append(tuple(extended_clique))
+#         if len(last) > 2:
+#           # forming the new pairs
+#           for pair in itertools.combinations(last, 2):
+#             candidate = prefix + tuple(sorted(pair))
+#             if can_serve_quasi_req(candidate, max_diameter, data, distances, connectivity_threshold):
+#               extended_clique = convex_hull_extend(candidate, origins, dest, data)
+#               shared_map[cardinality].append(tuple(extended_clique))
+
+#       # # now that we have a whole new candidate that we can use we can then check if they are valid
+#       # for clique in new_candidate:
+#       #   # quasi clique generation takes place here
+#       #   if can_serve_req(clique, max_diameter, data_reduced, info, distances):
+#       #     # we do the same extension that we did above
+#       #     extended_clique = convex_hull_extend(clique, origins, dest, data)
+#       #     shared_map[cardinality].append(extended_clique)
+#       if len(shared_map[cardinality]) > 0:
+#         not_empty = True
+#         final_results.extend(shared_map[cardinality])
+#         print("definitely moving onto cardinality", cardinality + 1)
+#       else:
+#         not_empty = False # this means that we no longer can extend
+#       print(cardinality, "cardinality done")
+#     return final_results, cardinality-1
 
 def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
 
@@ -419,113 +522,3 @@ def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
     # Save the plot instead of showing it
     plt.savefig(filename)
     plt.close()
-
-def main(): 
-  # Random seed
-  seed = 42
-  np.random.seed(seed)
-
-  # Generate the graph
-  G = generate_delaunary_graph(60, 10, one_way_prob=0.2, edge_ratio=0.8)
-
-  # Compute shortest path distances
-  distances = compute_shortest_path_distances(G)
-
-  # Generate demand with a mixed distribution (clusters + uniform)
-  centers = [(1.8, 6.3), (2.8, 2), (9.5, 3.8)]
-  radius = [1, 1, 1]
-  demand, _ = generate_od_demand_mixed(G, centers, radius, cluster_factor=10)
-  visualize_demand_pattern(G, demand, filename="demand_pattern.png")
-
-  data, max_dist, info = generate_dataframe(G, demand, distances)
-  print(data)
-  print(max_dist)
-
-  major_length = 4
-  data_reduced = reduce(data, major_length)
-  data_reduced.reset_index(drop=True, inplace=True)
-  print(data_reduced)
-
-  # can change the connectivity constraint and your max diameter
-  lst, cardinality = generate_shared_trips_more(len(data_reduced), 1.5, data_reduced, distances, info, 0.6)
-  print(lst)
-  print(len(lst))
-  print("Highest Cardinality", cardinality)
-
-  # need to fix there is a better way to do this 
-  d = {2: [], 3: [], 4: [], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 13:[], 14: [], 15:[], 16:[], 17:[]}
-  sum = 0
-  for i in lst:
-    d[len(i)].append(i)
-    sum += 1
-  for i in d.keys():
-    print("Cardinality-" + str(i) + ": " + str(len(d[i])))
-  saved_lst = lst
-  print(sum)
-
-  # optimization based on the lst
-  benefit = {}
-  for i in lst:
-    total = 0
-    for trip in i:
-      total += data_reduced.loc[trip, 'demand']
-    benefit[i] = total
-
-  print(benefit)
-
-  # i do not know if these params will work but will debug later
-  params = {
-  "WLSACCESSID": '3d967c9e-4aa5-4f43-a846-07dfc27bf8ed',
-  "WLSSECRET": 'd352f07c-2cc8-4cd9-9e9a-a2099278483f',
-  "LICENSEID": 2654733,
-  }
-  env = gp.Env(params=params)
-  model = gp.Model(env=env)
-  # create decision variables - we make one to indicate if the clique is chosen or not
-  y = {}
-  # stores whether or not it is a 1 or 0 basically (selected or not)
-  for clique in lst:
-    y[clique] = model.addVar(vtype = GRB.BINARY, obj = benefit[clique], name=f"y_{clique}")
-  # objective function
-  model.setObjective(gp.quicksum(benefit[clique] * y[clique] for clique in lst), GRB.MAXIMIZE)
-  # constraints
-
-  # ensuring that the cliques selected do not overlap
-  nodes = set()
-  for clique in lst:
-    for n in clique:
-      nodes.add(n)
-  # create the constraint that one node can only be selected at one time (non-overlapping)
-  for n in nodes:
-    # we only need to add the constraint if it is acc in the clique
-    model.addConstr(
-        gp.quicksum(y[clique] for clique in lst if n in clique) <= 1
-    )
-
-  # adding the constraint that we need to select less than m
-  # let's set m to 10
-  model.addConstr(
-      gp.quicksum(y[clique] for clique in lst) <= 10
-  )
-
-  model.optimize()
-
-  if model.status == GRB.OPTIMAL:
-    selected_zones = [clique for clique in lst if y[clique].X > 0.5]
-    print("Selected candidate zones:", selected_zones)
-    print("Optimal total benefit:", model.objVal)
-  
-  #post_processing of zones with nodes instead
-  l = []
-  for zones in selected_zones:
-    z = set()
-    for trip in zones:
-      z.add(data_reduced.loc[trip, 'trip1'])
-      z.add(data_reduced.loc[trip, 'trip2'])
-    l.append(list(z))
-
-  visualize_optimal_zones(G, l)
-
-if __name__ == "__main__":
-    main()
-
