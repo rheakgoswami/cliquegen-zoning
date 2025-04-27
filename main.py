@@ -1,16 +1,17 @@
-from utils import generate_delaunary_graph, compute_shortest_path_distances, generate_od_demand_mixed, generate_dataframe, clique_generator
-from utils import visualize_demand_pattern, visualize_optimal_zones
+from utils import generate_delaunary_graph, compute_shortest_path_distances, generate_od_demand_mixed, generate_dataframe, clique_generator_on_map
+from utils import visualize_demand_pattern, visualize_optimal_zones, solve_ILP, visualize_graph
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 import os
-
+import cProfile
+import pstats
 
 def main(): 
 
   #! [Hins] Parameters
   NUM_ZONES = 4
-  MAX_DIAMETER = 1
+  MAX_DIAMETER = 3
   CONNECTIVITY = 1
   seed = 42
   np.random.seed(seed)
@@ -20,7 +21,10 @@ def main():
     os.makedirs("output")
 
   # Generate the graph
-  G = generate_delaunary_graph(50, 10, one_way_prob=0, edge_ratio=0.8)
+  G = generate_delaunary_graph(100, 10, one_way_prob=0, edge_ratio=0.8)
+  
+  #![Hins] Debugging
+  # visualize_graph(G)
 
   # Compute shortest path distances
   # [Hins] Use the original distance but not the square one
@@ -33,8 +37,9 @@ def main():
   visualize_demand_pattern(G, demand, filename="demand_pattern.png")
 
   #![Hins] No max_dist
-  data = generate_dataframe(G, demand, distances, MAX_DIAMETER)
-  print(data)
+  #![Hins] We don't need this
+  # data = generate_dataframe(G, demand, distances, MAX_DIAMETER)
+  # print(data)
   # print(max_dist)
 
   #![Hins] Why set is as a different parameter? Shouldn't it be MAX_DIAMETER?
@@ -46,7 +51,9 @@ def main():
 
   # can change the connectivity constraint and your max diameter
   #![Hins] Use data not data_reduced (it was reduced inside while being created)
-  lst, cardinality = clique_generator(data, distances, MAX_DIAMETER, CONNECTIVITY)
+  # lst, cardinality = clique_generator(data, distances, MAX_DIAMETER, CONNECTIVITY)
+  
+  lst, cardinality = clique_generator_on_map(G, MAX_DIAMETER, distances, CONNECTIVITY)
   
   print(len(lst))
   print("Highest Cardinality", cardinality)
@@ -61,68 +68,34 @@ def main():
   #   print("Cardinality-" + str(i) + ": " + str(len(d[i])))
   # saved_lst = lst
   # print(sum)
-
-  # optimization based on the lst
-  benefit = {}
-  for clique in lst:
-    total = 0
-    for trip in clique:
-      total += data.loc[trip, 'demand']
-    benefit[clique] = total
-
-  # print(benefit)
-
-  # i do not know if these params will work but will debug later
-  params = {
-  "WLSACCESSID": '3d967c9e-4aa5-4f43-a846-07dfc27bf8ed',
-  "WLSSECRET": 'd352f07c-2cc8-4cd9-9e9a-a2099278483f',
-  "LICENSEID": 2654733,
-  }
-  env = gp.Env(params=params)
-  model = gp.Model(env=env)
-  # create decision variables - we make one to indicate if the clique is chosen or not
-  y = {}
-  # stores whether or not it is a 1 or 0 basically (selected or not)
-  for clique in lst:
-    y[clique] = model.addVar(vtype = GRB.BINARY, obj = benefit[clique], name=f"y_{clique}")
-  # objective function
-  model.setObjective(gp.quicksum(benefit[clique] * y[clique] for clique in lst), GRB.MAXIMIZE)
-  # constraints
-  # ensuring that the cliques selected do not overlap
-  #! [Hins] Use all nodes in G is fine. You don't need to create the nodes again
-  nodes = set()
-  for clique in lst:
-    for n in clique:
-      nodes.add(n)
-  # create the constraint that one node can only be selected at one time (non-overlapping)
-  for n in nodes:
-    # we only need to add the constraint if it is acc in the clique
-    model.addConstr(
-        gp.quicksum(y[clique] for clique in lst if n in clique) <= 1
-    )
-
-  # adding the constraint that we need to select less than m
-  model.addConstr(
-      gp.quicksum(y[clique] for clique in lst) <= NUM_ZONES
-  )
-
-  model.optimize()
-
-  if model.status == GRB.OPTIMAL:
-    selected_zones = [clique for clique in lst if y[clique].X > 0.5]
-    print("Selected candidate zones:", selected_zones)
-    print("Optimal total benefit:", model.objVal)
   
-  #post_processing of zones with nodes instead
-  l = []
-  for zones in selected_zones:
-    z = set()
-    for trip in zones:
-      z.add(data.loc[trip, 'origin_node'])
-      z.add(data.loc[trip, 'dest_node'])
-    l.append(list(z))
+  #![Hins] Use an updated ILP solver
+  # l = solve_ILP_Rhea(lst, data, NUM_ZONES)
+  l = solve_ILP(lst, demand, NUM_ZONES)
 
   visualize_optimal_zones(G, l)
 
 if __name__ == "__main__":
-    main()
+
+  #![Hins] Everything here is for profiling
+  # profiler = cProfile.Profile()
+  # profiler.enable()
+  # try:
+  main()
+  # except MemoryError:
+  #   print("Program terminated due to OOM error.")
+  # finally:
+  #   profiler.disable()
+  #   stats = pstats.Stats(profiler)
+  #   stats.strip_dirs()
+  #   stats.sort_stats("cumulative")
+
+  #   # Save profiling results to a file
+  #   with open("profile.out", "w") as f:
+  #       stats.stream = f  # Redirect output to the file
+  #       stats.print_stats()
+
+  #   # Print profiling results to stdout (captured in nohup log)
+  #   print("Profiling results:")
+  #   stats.stream = None  # Reset output to stdout
+  #   stats.print_stats(20)  # Print the top 20 functions

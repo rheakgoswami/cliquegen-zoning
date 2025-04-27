@@ -19,6 +19,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 import math
 from copy import deepcopy
+import heapq
 
 def generate_delaunary_graph(num_nodes, width, one_way_prob = 0.2, edge_ratio = 0.8):
 
@@ -536,3 +537,318 @@ def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
     # Save the plot instead of showing it
     plt.savefig(f"output/{filename}")
     plt.close()
+
+
+#! [Hins] Check whether two nodes are close enough
+def two_nodes_close(pair, max_diameter, distances):
+    return (distances[pair[0]][pair[1]] <= max_diameter) and (distances[pair[1]][pair[0]] <= max_diameter)
+
+
+#! [Hins] Check whether multiple nodes are close enough
+#TODO: extend it to quasi clique generation
+def multi_nodes_close(nodes, max_diameter, distances):
+    for pair in itertools.combinations(nodes, 2):
+        if not two_nodes_close(pair, max_diameter, distances):
+            return False
+    return True
+
+
+#![Hins] Check whether a node is close to a clique (i.e., a set of nodes close enough)
+#TODO: extend it to quasi clique generation
+def is_node_close_to_clique(node, clique, max_diameter, distances):
+    for n in clique:
+        if not two_nodes_close((node, n), max_diameter, distances):
+            return False
+    return True
+
+
+#![Hins] A function mimicking convex_hull_extend
+#*[Hins] I just realized that this does not exclude all cliques that are inside a convex hull of another clique
+#*[Hins] because the order of visiting clique is arbitrary
+
+#*[Hins] Another observation, when distances matrix is not symmetric (e.g. one-way roads exist),
+#*[Hins] a node inside a convex hull of a clique geographically may not be added to that clique
+def convex_hull_extend_on_map(clique, nodes, pos, pairwise_map, visited_cliques):
+    
+    # a tag
+    is_extended = False
+    
+    # pos is calculated before hand
+    points = []
+    for node in clique:
+        points.append(pos[node])
+
+    # create the convex hull
+    convex_hull = MultiPoint(points).convex_hull
+    # create the set that will have all the points that have to be grouped together
+    extend_set = deepcopy(clique)
+    # checks for all the possible trips that could be encapsulated
+    for node in set(nodes) - clique:
+        
+        # Filter out trips that are not shaerable
+        is_node_extendable = True
+        for item in clique:
+            if not pairwise_map[tuple(sorted((node, item)))]:
+                is_node_extendable = False
+                break
+        if not is_node_extendable:
+            continue
+        
+        # Check if the clique is already visited
+        clique_key = tuple(sorted(clique | {node}))
+        if visited_cliques[clique_key] == 1:
+            continue
+
+        # this means that the trip is encapsualted by the hull
+        if convex_hull.contains(pos[node]):
+            extend_set.add(node)
+    if extend_set != clique:
+        is_extended = True
+
+    return is_extended, extend_set
+    
+
+def clique_generator_on_map(H, max_diameter, distances, connectivity_threshold):
+
+    # Initialization
+    nodes = list(H.nodes())
+    shared_map = defaultdict(list)
+    shared_map[1] = [{n} for n in nodes]
+    visited_cliques = defaultdict(int)
+    card = 2
+    max_card = 2
+    
+    # Pre-computation for efficiency
+    pos = {n: Point(H.nodes[n]['pos']) for n in nodes}
+    pairwise_map = defaultdict(int)
+    for pair in itertools.combinations(nodes, 2):
+        pair = tuple(sorted(pair))
+        pairwise_map[pair] = two_nodes_close(pair, max_diameter, distances)
+    
+    while True:
+        # Termination condition
+        if card > max_card + 1:
+            break
+
+        prev_list = shared_map[card - 1]
+        for clique in prev_list:
+            for node in set(nodes) - clique:
+                
+                # Check if the new clique is visited already
+                clique_key = tuple(sorted(clique | {node}))
+                if visited_cliques[clique_key] == 1:
+                    continue
+
+                # Check if the new clique is valid when a new node is added
+                if is_node_close_to_clique(node, clique, max_diameter, distances):
+                        
+                    is_extended, extended_clique = convex_hull_extend_on_map(clique | {node}, nodes, pos, pairwise_map, visited_cliques)
+                    if is_extended:
+                        new_card = len(extended_clique)
+                        shared_map[new_card].append(extended_clique)
+                        clique_key = tuple(sorted(extended_clique))
+                        visited_cliques[clique_key] = 1
+                        max_card = max(max_card, new_card)
+                    else:
+                        shared_map[card].append(clique | {node})
+                        clique_key = tuple(sorted(clique | {node}))
+                        visited_cliques[clique_key] = 1
+                        max_card = max(max_card, card)
+                
+                else:
+                    # We also mark the invalid cliques as visited to avoid rechecking
+                    clique_key = tuple(sorted(clique | {node}))
+                    visited_cliques[clique_key] = 1
+                    
+        print(f"Cardinality {card} has {len(shared_map[card])} cliques")
+        print(f"Cardinality {card} complete")
+        
+        # Increase the cardinality
+        card += 1
+        
+    # Extract the final list of cliques
+    clique_list = []
+    for cliques in shared_map.values():
+        for clique in cliques:
+            clique_list.append(tuple(sorted(clique)))
+
+    return clique_list, max_card
+
+
+def solve_ILP(clique_list, demand, num_zones):
+    
+    benefit = {}
+    for clique in clique_list:
+        benefit[clique] = sum([demand[pair[0]][pair[1]] for pair in itertools.permutations(clique, 2)])
+    
+    # License from Rhea
+    params = {
+    "WLSACCESSID": '3d967c9e-4aa5-4f43-a846-07dfc27bf8ed',
+    "WLSSECRET": 'd352f07c-2cc8-4cd9-9e9a-a2099278483f',
+    "LICENSEID": 2654733,
+    }
+    env = gp.Env(params=params)
+    
+    # Create a model
+    model = gp.Model(env=env)
+    # create decision variables - we make one to indicate if the clique is chosen or not
+    y = {}
+    # stores whether or not it is a 1 or 0 basically (selected or not)
+    for clique in clique_list:
+        y[clique] = model.addVar(vtype = GRB.BINARY, obj = benefit[clique], name=f"y_{clique}")
+    # objective function
+    model.setObjective(gp.quicksum(benefit[clique] * y[clique] for clique in clique_list), GRB.MAXIMIZE)
+    # constraints
+    # ensuring that the cliques selected do not overlap
+    #! [Hins] Use all nodes in G is fine. You don't need to create the nodes again
+    nodes = set()
+    for clique in clique_list:
+        for n in clique:
+            nodes.add(n)
+    # create the constraint that one node can only be selected at one time (non-overlapping)
+    for n in nodes:
+    # we only need to add the constraint if it is acc in the clique
+        model.addConstr(
+            gp.quicksum(y[clique] for clique in clique_list if n in clique) <= 1
+        )
+
+    # adding the constraint that we need to select less than m
+    model.addConstr(
+        gp.quicksum(y[clique] for clique in clique_list) <= num_zones
+    )
+
+    model.optimize()
+    if model.status == GRB.OPTIMAL:
+        selected_zones = [clique for clique in clique_list if y[clique].X > 0.5]
+        print("Selected candidate zones:", selected_zones)
+        print("Optimal total benefit:", model.objVal)
+        
+    return selected_zones
+
+
+def solve_ILP_Rhea(lst, data, num_zones):
+    
+    # optimization based on the lst
+    benefit = {}
+    for clique in lst:
+        total = 0
+        for trip in clique:
+            total += data.loc[trip, 'demand']
+        benefit[clique] = total
+
+    # i do not know if these params will work but will debug later
+    params = {
+    "WLSACCESSID": '3d967c9e-4aa5-4f43-a846-07dfc27bf8ed',
+    "WLSSECRET": 'd352f07c-2cc8-4cd9-9e9a-a2099278483f',
+    "LICENSEID": 2654733,
+    }
+    env = gp.Env(params=params)
+    model = gp.Model(env=env)
+    # create decision variables - we make one to indicate if the clique is chosen or not
+    y = {}
+    # stores whether or not it is a 1 or 0 basically (selected or not)
+    for clique in lst:
+        y[clique] = model.addVar(vtype = GRB.BINARY, obj = benefit[clique], name=f"y_{clique}")
+    # objective function
+    model.setObjective(gp.quicksum(benefit[clique] * y[clique] for clique in lst), GRB.MAXIMIZE)
+    # constraints
+    # ensuring that the cliques selected do not overlap
+    #! [Hins] Use all nodes in G is fine. You don't need to create the nodes again
+    nodes = set()
+    for clique in lst:
+        for n in clique:
+            nodes.add(n)
+    # create the constraint that one node can only be selected at one time (non-overlapping)
+    for n in nodes:
+    # we only need to add the constraint if it is acc in the clique
+        model.addConstr(
+            gp.quicksum(y[clique] for clique in lst if n in clique) <= 1
+        )
+
+    # adding the constraint that we need to select less than m
+    model.addConstr(
+        gp.quicksum(y[clique] for clique in lst) <= num_zones
+    )
+
+    model.optimize()
+
+    if model.status == GRB.OPTIMAL:
+        selected_zones = [clique for clique in lst if y[clique].X > 0.5]
+        print("Selected candidate zones:", selected_zones)
+        print("Optimal total benefit:", model.objVal)
+
+    #post_processing of zones with nodes instead
+    l = []
+    for zones in selected_zones:
+        z = set()
+        for trip in zones:
+            z.add(data.loc[trip, 'origin_node'])
+            z.add(data.loc[trip, 'dest_node'])
+        l.append(list(z))
+    
+    return l
+
+
+def visualize_graph(G, node_size=300, font_size=12, edge_labels=False, layout='spring', figsize=(8, 6), filename='output/base_graph.png'):
+    """
+    Visualizes a NetworkX graph and saves it to a file.
+
+    Parameters:
+        G (networkx.Graph): The input graph.
+        node_size (int): Size of the nodes.
+        font_size (int): Font size for node labels.
+        edge_labels (bool): Whether to display edge weights/labels.
+        layout (str): Layout algorithm ('spring', 'circular', 'kamada_kawai', 'shell').
+        figsize (tuple): Size of the figure.
+        filename (str): Path to save the figure.
+    """
+    layout_functions = {
+        'spring': nx.spring_layout,
+        'circular': nx.circular_layout,
+        'kamada_kawai': nx.kamada_kawai_layout,
+        'shell': nx.shell_layout
+    }
+    
+    if layout not in layout_functions:
+        raise ValueError(f"Unsupported layout '{layout}'. Choose from {list(layout_functions.keys())}.")
+
+    pos = layout_functions[layout](G)
+    
+    plt.figure(figsize=figsize)
+    nx.draw(G, pos, with_labels=True, node_size=node_size, font_size=font_size, edge_color='gray', node_color='skyblue')
+    
+    if edge_labels:
+        labels = nx.get_edge_attributes(G, 'weight')
+        nx.draw_networkx_edge_labels(G, pos, edge_labels=labels, font_size=font_size)
+    
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(filename, format='png')
+    plt.close()
+
+
+#TODO: [Hins] Working on the baseline algorithm
+def baseline_algo(H, num_zones, max_diameter, demand, distances, connectivity_threshold):
+    
+    nodes = list(H.nodes())
+    
+    # Pre-compute the pairwise shareability
+    pairwise_map = defaultdict(int)
+    for pair in itertools.combinations(nodes, 2):
+        pair = tuple(sorted(pair))
+        pairwise_map[pair] = two_nodes_close(pair, max_diameter, distances)
+        
+    # Pick num_zones pairs of nodes with the highest demand
+    pair_list = []
+    for pair in itertools.combinations(nodes, 2):
+        pair = tuple(sorted(pair))
+        
+        # Check if the pair can be even in a zone
+        if pairwise_map[pair] == 0:
+            continue
+        
+        o, d = pair
+        demand_served = demand[o][d] + demand[d][o]
+        pair_list.append((demand_served, {o, d}))
+    selected_zones = [pair, _  for pair in heapq.nlargest(num_zones, pair_list)]
+    
