@@ -154,7 +154,7 @@ def generate_od_demand_mixed(H, cluster_centers, cluster_radius, is_cluster=True
 
     return demand, cluster_map
 
-def visualize_demand_pattern(H, demand, filename="demand_pattern.png"):
+def visualize_demand_pattern(H, demand, filename="output/demand_pattern.png"):
     """
     Visualize the demand pattern on a graph.
 
@@ -184,7 +184,7 @@ def visualize_demand_pattern(H, demand, filename="demand_pattern.png"):
     cbar.set_label('Demand Level')
     ax.set_title("Demand Heatmap")
 
-    plt.savefig(f"output/{filename}")
+    plt.savefig(filename)
     plt.close()
 
 def generate_dataframe(H, demand, cost_dist, max_diameter):
@@ -492,7 +492,7 @@ def clique_generator(data, distances, max_diameter, connectivity_threshold):
 #       print(cardinality, "cardinality done")
 #     return final_results, cardinality-1
 
-def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
+def visualize_optimal_zones(H, zones, filename="output/zones_plot.png"):
 
     """
     Visualize the selected zones on a graph.
@@ -535,7 +535,7 @@ def visualize_optimal_zones(H, zones, filename="zones_plot.png"):
     ax.legend()
 
     # Save the plot instead of showing it
-    plt.savefig(f"output/{filename}")
+    plt.savefig(filename)
     plt.close()
 
 
@@ -721,7 +721,6 @@ def solve_ILP(clique_list, demand, num_zones):
     if model.status == GRB.OPTIMAL:
         selected_zones = [clique for clique in clique_list if y[clique].X > 0.5]
         print("Selected candidate zones:", selected_zones)
-        print("Optimal total benefit:", model.objVal)
         
     return selected_zones
 
@@ -827,28 +826,68 @@ def visualize_graph(G, node_size=300, font_size=12, edge_labels=False, layout='s
     plt.close()
 
 
-#TODO: [Hins] Working on the baseline algorithm
-def baseline_algo(H, num_zones, max_diameter, demand, distances, connectivity_threshold):
+def baseline_A(H, demand, max_diameter, distances, num_zones):
     
-    nodes = list(H.nodes())
+    # Initialization
+    nodes = set(H.nodes())
+    selected_zones = []
     
-    # Pre-compute the pairwise shareability
+    # Pre-computation for efficiency
     pairwise_map = defaultdict(int)
     for pair in itertools.combinations(nodes, 2):
         pair = tuple(sorted(pair))
         pairwise_map[pair] = two_nodes_close(pair, max_diameter, distances)
-        
-    # Pick num_zones pairs of nodes with the highest demand
-    pair_list = []
-    for pair in itertools.combinations(nodes, 2):
-        pair = tuple(sorted(pair))
-        
-        # Check if the pair can be even in a zone
-        if pairwise_map[pair] == 0:
-            continue
-        
-        o, d = pair
-        demand_served = demand[o][d] + demand[d][o]
-        pair_list.append((demand_served, {o, d}))
-    selected_zones = [pair, _  for pair in heapq.nlargest(num_zones, pair_list)]
     
+
+    for i in range(num_zones):
+
+        if len(nodes) < 2:
+            raise ValueError(f"Not enough nodes to form {num_zones} zones.")
+
+        # Select pair with highest demand        
+        pair = max(
+            ((demand[o][d] + demand[d][o], o, d) for o, d in itertools.combinations(nodes, 2) if pairwise_map[tuple(sorted((o, d)))]),
+            default=None
+        )
+        if pair is None:
+            raise ValueError("No valid pairs found within the distance threshold.")
+        
+        _, o, d = pair
+        zone = {o, d}
+        nodes -= {o, d}
+
+        # Dynamically add a node to the current zone that leads to the largest increment in demand served
+        while True:
+            best_candidate = None
+            best_demand = -1
+
+            for n in nodes:
+                if is_node_close_to_clique(n, zone, max_diameter, distances):
+                    # Compute total demand between n and nodes already in the zone
+                    demand_to_zone = sum(demand[n][z] + demand[z][n] for z in zone)
+                    if demand_to_zone > best_demand:
+                        best_demand = demand_to_zone
+                        best_candidate = n
+
+            if best_candidate is None:
+                print(f"No more candidate nodes to be added. Complete the expansion for zone {i}")
+                break  # no eligible node to add
+
+            zone.add(best_candidate)
+            nodes.remove(best_candidate)
+
+        selected_zones.append(zone)
+        
+    return selected_zones
+
+
+def calculate_total_demand_served(selected_zones, demand):
+
+    total_demand = 0
+    for zone in selected_zones:
+        for i in zone:
+            for j in zone:
+                if i != j:
+                    total_demand += demand[i][j]
+                    total_demand += demand[j][i]
+    return total_demand

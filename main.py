@@ -1,5 +1,5 @@
 from utils import generate_delaunary_graph, compute_shortest_path_distances, generate_od_demand_mixed, generate_dataframe, clique_generator_on_map
-from utils import visualize_demand_pattern, visualize_optimal_zones, solve_ILP, visualize_graph
+from utils import visualize_demand_pattern, visualize_optimal_zones, solve_ILP, visualize_graph, baseline_A, calculate_total_demand_served
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
@@ -11,8 +11,9 @@ def main():
 
   #! [Hins] Parameters
   NUM_ZONES = 4
-  MAX_DIAMETER = 3
+  MAX_DIAMETER = 2.5
   CONNECTIVITY = 1
+  ALGO = "baseline_A" # "clique_generation" or "baseline_A"
   seed = 42
   np.random.seed(seed)
   
@@ -21,7 +22,7 @@ def main():
     os.makedirs("output")
 
   # Generate the graph
-  G = generate_delaunary_graph(100, 10, one_way_prob=0, edge_ratio=0.8)
+  G = generate_delaunary_graph(150, 10, one_way_prob=0, edge_ratio=0.8)
   
   #![Hins] Debugging
   # visualize_graph(G)
@@ -34,7 +35,7 @@ def main():
   centers = [(1.8, 6.3), (2.8, 2), (9.5, 3.8)]
   radius = [1, 1, 1]
   demand, _ = generate_od_demand_mixed(G, centers, radius, cluster_factor=10)
-  visualize_demand_pattern(G, demand, filename="demand_pattern.png")
+  visualize_demand_pattern(G, demand, filename="output/demand_pattern.png")
 
   #![Hins] No max_dist
   #![Hins] We don't need this
@@ -53,27 +54,39 @@ def main():
   #![Hins] Use data not data_reduced (it was reduced inside while being created)
   # lst, cardinality = clique_generator(data, distances, MAX_DIAMETER, CONNECTIVITY)
   
-  lst, cardinality = clique_generator_on_map(G, MAX_DIAMETER, distances, CONNECTIVITY)
-  
-  print(len(lst))
-  print("Highest Cardinality", cardinality)
+  if ALGO == "clique_generation":
+    lst, cardinality = clique_generator_on_map(G, MAX_DIAMETER, distances, CONNECTIVITY)
+    
+    print(len(lst))
+    print("Highest Cardinality", cardinality)
 
-  # need to fix there is a better way to do this 
-  # d = {2: [], 3: [], 4: [], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 13:[], 14: [], 15:[], 16:[], 17:[]}
-  # sum = 0
-  # for i in lst:
-  #   d[len(i)].append(i)
-  #   sum += 1
-  # for i in d.keys():
-  #   print("Cardinality-" + str(i) + ": " + str(len(d[i])))
-  # saved_lst = lst
-  # print(sum)
+    # need to fix there is a better way to do this 
+    # d = {2: [], 3: [], 4: [], 5:[], 6:[], 7:[], 8:[], 9:[], 10:[], 11:[], 12:[], 13:[], 14: [], 15:[], 16:[], 17:[]}
+    # sum = 0
+    # for i in lst:
+    #   d[len(i)].append(i)
+    #   sum += 1
+    # for i in d.keys():
+    #   print("Cardinality-" + str(i) + ": " + str(len(d[i])))
+    # saved_lst = lst
+    # print(sum)
+    
+    #![Hins] Use an updated ILP solver
+    # l = solve_ILP_Rhea(lst, data, NUM_ZONES)
+    selected_zones = solve_ILP(lst, demand, NUM_ZONES)
+    print("Selected zones:", selected_zones)
+    print("Total demand served:", calculate_total_demand_served(selected_zones, demand))
+    visualize_optimal_zones(G, selected_zones, filename="output/optimal_zones.png")
   
-  #![Hins] Use an updated ILP solver
-  # l = solve_ILP_Rhea(lst, data, NUM_ZONES)
-  l = solve_ILP(lst, demand, NUM_ZONES)
-
-  visualize_optimal_zones(G, l)
+  elif ALGO == "baseline_A":
+    selected_zones = baseline_A(G, demand, MAX_DIAMETER, distances, NUM_ZONES)
+    print("Selected zones:", selected_zones)
+    print("Total demand served:", calculate_total_demand_served(selected_zones, demand))
+    visualize_optimal_zones(G, selected_zones, filename="output/zones_by_heuristic.png")
+    
+  else:
+    raise ValueError("Invalid algorithm selected. Choose 'clique_generation' or 'baseline_A'.")
+  
 
 if __name__ == "__main__":
 
