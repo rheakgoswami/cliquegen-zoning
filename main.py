@@ -11,9 +11,10 @@ def main():
 
   #! [Hins] Parameters
   NUM_ZONES = 4
-  MAX_DIAMETER = 2.5
+  MAX_DIAMETER = 3
   CONNECTIVITY = 1
-  ALGO = "baseline_A" # "clique_generation" or "baseline_A"
+  ALGO = "clique_generation" # "clique_generation" or "baseline_A"
+  NUM_NODE = 200
   seed = 42
   np.random.seed(seed)
   
@@ -22,7 +23,7 @@ def main():
     os.makedirs("output")
 
   # Generate the graph
-  G = generate_delaunary_graph(150, 10, one_way_prob=0, edge_ratio=0.8)
+  G = generate_delaunary_graph(NUM_NODE, 10, one_way_prob=0, edge_ratio=0.8)
   
   #![Hins] Debugging
   # visualize_graph(G)
@@ -73,7 +74,7 @@ def main():
     
     #![Hins] Use an updated ILP solver
     # l = solve_ILP_Rhea(lst, data, NUM_ZONES)
-    selected_zones = solve_ILP(lst, demand, NUM_ZONES)
+    selected_zones = solve_ILP(G, lst, demand, NUM_ZONES)
     print("Selected zones:", selected_zones)
     print("Total demand served:", calculate_total_demand_served(selected_zones, demand))
     visualize_optimal_zones(G, selected_zones, filename="output/optimal_zones.png")

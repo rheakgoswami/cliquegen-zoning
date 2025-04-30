@@ -674,8 +674,86 @@ def clique_generator_on_map(H, max_diameter, distances, connectivity_threshold):
 
     return clique_list, max_card
 
+def solve_ILP(H, clique_list, demand, num_zones):
+    
+    # Initialization
+    # V = set().union(*clique_list)
+    V = list(H.nodes())
+    # clique_2_node = {}
+    # for clique in clique_list:
+    #     node_map = defaultdict(int)
+    #     for node in clique:
+    #         node_map[node] = 1
+    #     clique_2_node[tuple(clique)] = node_map
+        
+    # Pre-computation to extract the useful pairs of nodes
+    valid_pairs = set()
+    pair_2_clique = defaultdict(list)
+    for clique in clique_list:
+        for pair in itertools.permutations(clique, 2):
+            valid_pairs.add(pair)
+            pair_2_clique[pair].append(clique)
+    
+    
+    # License from Rhea
+    params = {
+    "WLSACCESSID": '3d967c9e-4aa5-4f43-a846-07dfc27bf8ed',
+    "WLSSECRET": 'd352f07c-2cc8-4cd9-9e9a-a2099278483f',
+    "LICENSEID": 2654733,
+    }
+    env = gp.Env(params=params)
+    
+    # Add variables
+    model = gp.Model(env=env)
+    x = {}
+    for clique in clique_list:
+        x[clique] = model.addVar(vtype = GRB.BINARY, name=f"x_{clique}")
+    #! Debug: we observe duplicate cliques here, which is not supposed to happen
+    #! It does not affect the final result. Reserve 4 later debugging
+    # x = model.addVars(clique_list, vtype=GRB.BINARY, name=f"x")
+    w = {}
+    for i, j in valid_pairs:
+        w[i, j] = model.addVar(vtype=GRB.BINARY, name=f"w_{i}_{j}")
+    
+    # w = model.addVars(V, V, vtype=GRB.BINARY, name=f"w")
+    # for i in V:
+    #     model.remove(w[i, i])
+    
+    model.setObjective(quicksum(demand[i][j] * w[i, j] for i, j in valid_pairs), GRB.MAXIMIZE)
+    
+    # Constraints: linking x and w
+    for i, j in valid_pairs:
+        model.addConstr(
+            w[i, j] <= quicksum(x[clique] for clique in pair_2_clique[(i, j)]),
+            name=f"link_{i}_{j}"
+        )
+    # link_constrs = {}
+    # for i in V:
+    #     for j in V:
+    #         if i == j:
+    #             continue            
+    #         link_constrs[(i, j)] = model.addConstr(w[i, j] <= quicksum(clique_2_node[clique][i] * clique_2_node[clique][j] * x[clique] for clique in clique_list), name=f"link_{i}_{j}")
+    
+    # Constraint: Max number of cliques
+    model.addConstr(
+        gp.quicksum(x[clique] for clique in clique_list) <= num_zones
+    )
+    
+    # Optimization
+    model.optimize()    
+    if model.status == (GRB.OPTIMAL or GRB.SUBOPTIMAL):
+        print("The max coverage ILP was solved to optimality.")
+        selected_zones = [clique for clique in clique_list if x[clique].X > 0.5]
+        print("Selected candidate zones:", selected_zones)
 
-def solve_ILP(clique_list, demand, num_zones):
+    else:
+        print("Fail to solve the max coverage ILP.")
+        
+    return selected_zones
+    
+    
+
+def solve_ILP_non_overlap(clique_list, demand, num_zones):
     
     benefit = {}
     for clique in clique_list:
