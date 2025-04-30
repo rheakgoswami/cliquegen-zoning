@@ -595,9 +595,9 @@ def convex_hull_extend_on_map(clique, nodes, pos, pairwise_map, visited_cliques)
             continue
         
         # Check if the clique is already visited
-        clique_key = tuple(sorted(clique | {node}))
-        if visited_cliques[clique_key] == 1:
-            continue
+        # clique_key = tuple(sorted(clique | {node}))
+        # if visited_cliques[clique_key] == 1:
+        #     continue
 
         # this means that the trip is encapsualted by the hull
         if convex_hull.contains(pos[node]):
@@ -644,11 +644,12 @@ def clique_generator_on_map(H, max_diameter, distances, connectivity_threshold):
                         
                     is_extended, extended_clique = convex_hull_extend_on_map(clique | {node}, nodes, pos, pairwise_map, visited_cliques)
                     if is_extended:
-                        new_card = len(extended_clique)
-                        shared_map[new_card].append(extended_clique)
-                        clique_key = tuple(sorted(extended_clique))
-                        visited_cliques[clique_key] = 1
-                        max_card = max(max_card, new_card)
+                        extended_key = tuple(sorted(extended_clique))
+                        if not visited_cliques[extended_key]:
+                            new_card = len(extended_clique)
+                            shared_map[new_card].append(extended_clique)
+                            visited_cliques[extended_key] = 1
+                            max_card = max(max_card, new_card)
                     else:
                         shared_map[card].append(clique | {node})
                         clique_key = tuple(sorted(clique | {node}))
@@ -671,6 +672,18 @@ def clique_generator_on_map(H, max_diameter, distances, connectivity_threshold):
     for cliques in shared_map.values():
         for clique in cliques:
             clique_list.append(tuple(sorted(clique)))
+    
+    #!Debugging
+    seen = set()
+    count = 0
+    for clique in clique_list:
+        key = tuple(sorted(clique))
+        if key in seen:
+            count += 1
+        else:
+            seen.add(key)
+    print(f"{count} duplicates found")
+
 
     return clique_list, max_card
 
