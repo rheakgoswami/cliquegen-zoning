@@ -1,0 +1,11 @@
+
+
+### Comments
+
+1. Check all inline comments starting with [Hins]
+2. requirement.txt is not complete. I have to mannually install more after  pip install -r requirements.txt.
+3. Modularize the code. Don't put everything in a single file.
+4. No stdout in logging for each step in your pipeline. Users don't know how long they have to wait and not sure everything is ok.
+5. Add line spacing between functions and code blocks.
+6. You need a time counter (or by profiling) to see how much time clique generation and the ILP take, respectively.
+7. Use nohup and bash script to facilitates running extensive experiments in parallel.

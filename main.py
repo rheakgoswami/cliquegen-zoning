@@ -11,7 +11,7 @@ def main():
 
   #! [Hins] Parameters
   NUM_ZONES = 4
-  MAX_DIAMETER = 3
+  MAX_DIAMETER = 2.5
   CONNECTIVITY = 1
   ALGO = "clique_generation" # "clique_generation" or "baseline_A"
   NUM_NODE = 200
@@ -36,6 +36,8 @@ def main():
   centers = [(1.8, 6.3), (2.8, 2), (9.5, 3.8)]
   radius = [1, 1, 1]
   demand, _ = generate_od_demand_mixed(G, centers, radius, cluster_factor=10)
+  total_demand = sum(sum(inner.values()) for inner in demand.values())
+  print("Total demand:", total_demand)
   visualize_demand_pattern(G, demand, filename="output/demand_pattern.png")
 
   #![Hins] No max_dist

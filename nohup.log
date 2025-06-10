@@ -1,0 +1,83 @@
+Total demand: 20324.832141060102
+Cardinality 2 has 2041 cliques
+Cardinality 2 complete
+Cardinality 3 has 4558 cliques
+Cardinality 3 complete
+Cardinality 4 has 6945 cliques
+Cardinality 4 complete
+Cardinality 5 has 8591 cliques
+Cardinality 5 complete
+Cardinality 6 has 9072 cliques
+Cardinality 6 complete
+Cardinality 7 has 8322 cliques
+Cardinality 7 complete
+Cardinality 8 has 6667 cliques
+Cardinality 8 complete
+Cardinality 9 has 4602 cliques
+Cardinality 9 complete
+Cardinality 10 has 2723 cliques
+Cardinality 10 complete
+Cardinality 11 has 1389 cliques
+Cardinality 11 complete
+Cardinality 12 has 612 cliques
+Cardinality 12 complete
+Cardinality 13 has 231 cliques
+Cardinality 13 complete
+Cardinality 14 has 74 cliques
+Cardinality 14 complete
+Cardinality 15 has 20 cliques
+Cardinality 15 complete
+Cardinality 16 has 3 cliques
+Cardinality 16 complete
+Cardinality 17 has 0 cliques
+Cardinality 17 complete
+0 duplicates found
+56050
+Highest Cardinality 16
+Set parameter Username
+Set parameter LicenseID to value 2654751
+Set parameter WLSAccessID
+Set parameter WLSSecret
+Set parameter LicenseID to value 2654733
+Academic license 2654733 - for non-commercial use only - registered to rk___@cornell.edu
+Gurobi Optimizer version 12.0.1 build v12.0.1rc0 (linux64 - "Ubuntu 22.04.3 LTS")
+
+CPU model: 13th Gen Intel(R) Core(TM) i7-1355U, instruction set [SSE2|AVX|AVX2]
+Thread count: 6 physical cores, 12 logical processors, using up to 12 threads
+
+Academic license 2654733 - for non-commercial use only - registered to rk___@cornell.edu
+Optimize a model with 4083 rows, 60132 columns and 2206170 nonzeros
+Model fingerprint: 0xe26c3b03
+Variable types: 0 continuous, 60132 integer (60132 binary)
+Coefficient statistics:
+  Matrix range     [1e+00, 1e+00]
+  Objective range  [5e-05, 1e+01]
+  Bounds range     [1e+00, 1e+00]
+  RHS range        [4e+00, 4e+00]
+Found heuristic solution: objective -0.0000000
+Presolve removed 2604 rows and 58347 columns
+Presolve time: 0.91s
+Presolved: 1479 rows, 1785 columns, 11143 nonzeros
+Variable types: 0 continuous, 1785 integer (1785 binary)
+Performing another presolve...
+Presolve removed 329 rows and 329 columns
+Presolve time: 0.05s
+
+Root relaxation: objective 7.960918e+02, 1471 iterations, 0.03 seconds (0.01 work units)
+
+    Nodes    |    Current Node    |     Objective Bounds      |     Work
+ Expl Unexpl |  Obj  Depth IntInf | Incumbent    BestBd   Gap | It/Node Time
+
+*    0     0               0     796.0918329  796.09183  0.00%     -    1s
+
+Explored 1 nodes (1471 simplex iterations) in 1.13 seconds (0.93 work units)
+Thread count was 12 (of 12 available processors)
+
+Solution count 2: 796.092 -0 
+
+Optimal solution found (tolerance 1.00e-04)
+Best objective 7.960918328719e+02, best bound 7.960918328719e+02, gap 0.0000%
+The max coverage ILP was solved to optimality.
+Selected candidate zones: [(22, 45, 50, 92, 103, 117, 127, 177, 186, 190), (7, 18, 39, 41, 54, 55, 61, 72, 83, 90, 112, 141, 193), (10, 14, 15, 24, 85, 87, 100, 102, 106, 119, 129, 142, 149, 173, 176), (31, 52, 67, 70, 75, 77, 113, 121, 126, 140, 146, 154, 182, 189, 195, 198)]
+Selected zones: [(22, 45, 50, 92, 103, 117, 127, 177, 186, 190), (7, 18, 39, 41, 54, 55, 61, 72, 83, 90, 112, 141, 193), (10, 14, 15, 24, 85, 87, 100, 102, 106, 119, 129, 142, 149, 173, 176), (31, 52, 67, 70, 75, 77, 113, 121, 126, 140, 146, 154, 182, 189, 195, 198)]
+Total demand served: 1592.183665743842
